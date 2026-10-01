@@ -1,0 +1,6 @@
+[telegram]
+# Получить на https://my.telegram.org -> API development tools
+api_id =
+api_hash =
+# Во сколько накануне акции напоминать (час, по Варшаве)
+remind_hour = 19

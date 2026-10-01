@@ -1,0 +1,15 @@
+# python 3.13; установка: pip install -r requirements.txt
+requests
+flask
+beautifulsoup4
+pymupdf            # PDF газеток и чеков
+pillow
+pillow-heif        # фото с iPhone (HEIC)
+selenium           # вход в Lidl / Kaufland / банк через окно Chrome
+telethon           # фото чеков из Telegram
+keyring            # пароли почты и бэкапов — в диспетчере учётных данных Windows
+pyzipper           # зашифрованные резервные копии (AES-256)
+pyjwt
+cryptography       # подпись запросов к Enable Banking
+tzdata
+easyocr            # необязательно: перепроверка фото чеков (тянет PyTorch, ~1-2 ГБ)

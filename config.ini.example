@@ -1,0 +1,29 @@
+; Скопируй в config.ini и заполни. config.ini содержит секреты — никому не отправляй.
+
+[telegram]
+; https://my.telegram.org -> API development tools
+api_id =
+api_hash =
+; ссылка-приглашение группы, куда отправляешь фото чеков
+receipts_chat = https://t.me/+...
+
+[mail]
+imap_host = imap.gmail.com
+; адрес Gmail (если пусто — mail login спросит)
+user =
+; пароль приложения Google хранится не здесь, а в диспетчере учётных данных: python budget.py mail login
+
+[backup]
+; основная папка копий (по умолчанию budget\backups)
+; dir = D:\budget-backups
+; вторая папка: флешка, OneDrive... (копии зашифрованы)
+; copy_to = D:\Backup\budget
+keep = 10
+
+[cards]
+; подписи карт других счетов: последние 4 цифры = название
+; 1234 = карта другого банка
+
+[update]
+; как часто делать резервную копию при обновлении, в днях (0 — не делать)
+backup_every_days = 1
