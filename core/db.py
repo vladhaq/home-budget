@@ -1,9 +1,9 @@
-"""Единая база бюджета: data/budget.db.
+"""Единая база бюджета: data/budget.db. Вся схема — здесь; изменения схемы — миграции ниже (PRAGMA user_version).
 
-purchases — покупка (чек, онлайн-заказ), источник любой;
+purchases — покупка (чек, онлайн-заказ, операция банка без чека), источник любой;
 items     — позиции покупки;
-bank_tx   — операции из выписки (проверка полноты данных);
-categories / rules — дерево категорий и правила назначения;
+bank_tx   — операции из выписки; связь с покупкой — purchases.bank_tx_id (одна операция — одна или несколько покупок);
+categories / rules — дерево категорий (у системных — постоянный ключ key) и правила назначения;
 meta      — служебные значения (например, дата последней выписки).
 """
 import sqlite3
@@ -72,15 +72,71 @@ CREATE TABLE IF NOT EXISTS attachments (purchase_id TEXT, path TEXT, source_ref 
     added TEXT, PRIMARY KEY (purchase_id, path));
 CREATE TABLE IF NOT EXISTS item_notes (purchase_id TEXT, line INTEGER, name TEXT, note TEXT, updated TEXT,
     PRIMARY KEY (purchase_id, line));
+-- платёж «под вопросом» (регистрация без подтверждения, которой нет в банке), который ты подтвердил: считать
+CREATE TABLE IF NOT EXISTS confirmed_purchases (id TEXT PRIMARY KEY, created TEXT);
+-- наличные: твои записи и уточнённое время операций банка (банк даёт только дату)
+CREATE TABLE IF NOT EXISTS wallet_entries (
+    id INTEGER PRIMARY KEY, date TEXT NOT NULL, kind TEXT NOT NULL, amount REAL NOT NULL, note TEXT
+);
+CREATE TABLE IF NOT EXISTS wallet_times (tx_id TEXT PRIMARY KEY, at TEXT NOT NULL);
+-- журнал «обновить всё»
+CREATE TABLE IF NOT EXISTS update_runs (
+  id INTEGER PRIMARY KEY, started TEXT, finished TEXT, trigger TEXT, steps TEXT, status TEXT, summary TEXT);
+CREATE TABLE IF NOT EXISTS update_steps (
+  run_id INTEGER, step TEXT, started TEXT, finished TEXT, status TEXT, summary TEXT, hint TEXT, output TEXT,
+  PRIMARY KEY (run_id, step));
+-- почта: заголовки писем и решения по отправителям
+CREATE TABLE IF NOT EXISTS emails (
+    uid INTEGER PRIMARY KEY, msg_id TEXT, date TEXT, from_addr TEXT, from_name TEXT, domain TEXT,
+    subject TEXT, size INTEGER, labels TEXT, path TEXT
+);
+CREATE INDEX IF NOT EXISTS emails_domain ON emails(domain);
+CREATE TABLE IF NOT EXISTS mail_senders (domain TEXT PRIMARY KEY, status TEXT, note TEXT);
 CREATE INDEX IF NOT EXISTS items_purchase ON items(purchase_id);
 CREATE INDEX IF NOT EXISTS purchases_date ON purchases(date);
 CREATE INDEX IF NOT EXISTS payments_purchase ON payments(purchase_id);
 """
 
 
-ITEM_EXTRA_COLUMNS = {"section": "TEXT", "group_code": "TEXT"}  # отдел магазина, товарная группа магазина
-# когда операция впервые пришла из банка: банк даёт только дату, а для наличных важен порядок с твоими пересчётами
-BANK_EXTRA_COLUMNS = {"seen": "TEXT"}
+def add_columns(con, table: str, cols: dict):
+    have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+    for col, kind in cols.items():
+        if col not in have:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
+
+
+def m1_legacy_columns(con):
+    """Колонки, которые раньше добавлялись по месту (connect, сверка)."""
+    add_columns(con, "items", {"section": "TEXT", "group_code": "TEXT"})  # отдел магазина, товарная группа магазина
+    # seen — когда операция впервые пришла из банка (для порядка с пересчётами наличных)
+    add_columns(con, "bank_tx", {"category_id": "INTEGER", "category_source": "TEXT", "seen": "TEXT"})
+
+
+def m2_keys_refunds_doubts(con):
+    add_columns(con, "categories", {"key": "TEXT"})  # постоянный ключ системной категории: «food.meat»
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS categories_key ON categories(key) WHERE key IS NOT NULL")
+    # refund_of — возврат: id исходной покупки; status — doubt («под вопросом», в суммы не идёт) или NULL;
+    # orig_total / orig_* — сумма из чека до поправки сверкой под фактическое списание в банке
+    add_columns(con, "purchases", {"refund_of": "TEXT", "status": "TEXT", "orig_total": "REAL"})
+    add_columns(con, "items", {"orig_amount": "REAL", "orig_unit_price": "REAL", "orig_discount": "REAL"})
+    con.execute("CREATE INDEX IF NOT EXISTS purchases_bank ON purchases(bank_tx_id)")
+
+
+def m3_single_link(con):
+    """Связь с выпиской — только purchases.bank_tx_id (bank_tx.purchase_id дублировал её списком через запятую)."""
+    if "purchase_id" in {r["name"] for r in con.execute("PRAGMA table_info(bank_tx)")}:
+        con.execute("ALTER TABLE bank_tx DROP COLUMN purchase_id")
+
+
+MIGRATIONS = [m1_legacy_columns, m2_keys_refunds_doubts, m3_single_link]  # номер миграции = позиция + 1; только дописывать в конец
+
+
+def migrate(con):
+    ver = con.execute("PRAGMA user_version").fetchone()[0]
+    for n, step in enumerate(MIGRATIONS[ver:], ver + 1):
+        step(con)
+        con.execute(f"PRAGMA user_version = {n}")
+        con.commit()
 
 
 def connect() -> sqlite3.Connection:
@@ -88,14 +144,8 @@ def connect() -> sqlite3.Connection:
     con = sqlite3.connect(DB, timeout=30)  # обновление в фоне и интерфейс могут писать одновременно
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
-    have = {r["name"] for r in con.execute("PRAGMA table_info(items)")}
-    for col, kind in ITEM_EXTRA_COLUMNS.items():
-        if col not in have:
-            con.execute(f"ALTER TABLE items ADD COLUMN {col} {kind}")
-    have = {r["name"] for r in con.execute("PRAGMA table_info(bank_tx)")}
-    for col, kind in BANK_EXTRA_COLUMNS.items():
-        if col not in have:
-            con.execute(f"ALTER TABLE bank_tx ADD COLUMN {col} {kind}")
+    if con.execute("PRAGMA user_version").fetchone()[0] < len(MIGRATIONS):
+        migrate(con)
     return con
 
 

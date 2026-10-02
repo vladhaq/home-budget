@@ -3,8 +3,11 @@
 1. Каждая покупка (чек, заказ из почты, фото) ищет свою операцию в банке: та же сумма, дата -3..+5 дней,
    совпадение продавца — приоритет. Для покупок в валюте — допуск 6% (курс и комиссия банка ≠ курс NBP).
 2. Операции без чека становятся покупками с источником «банк» (категория — по получателю и описанию).
-3. Переводы людям, банкомат, взносы — категории «Переводы» (не расход). Доходы — категории «Доходы».
-4. Возвраты на карту — отрицательные покупки в категории исходной покупки.
+3. Переводы людям, банкомат — категории «Переводы» (не расход). Доходы и взносы наличных — категории «Доходы».
+4. Возвраты на карту — отрицательные покупки со ссылкой на исходную покупку (refund_of), её категория.
+5. Регистрация платежа без подтверждения, которой нет в выписке, — «под вопросом» (в суммы не идёт).
+
+reconcile() — пересборка источников + сверка; match() — только сверка (повторяемая, суммы из чека хранятся в orig_*).
 
   python budget.py reconcile
 """
@@ -13,58 +16,75 @@ import json
 import re
 
 from core import categories
-from core.common import fold
+from core.common import fold, local_pairs
 from core.db import connect, save_purchase, set_meta
 
-CITY_PREFIX = re.compile(r"^(wroclaw|warszawa|poznan|lodz|gdansk|gdynia|krakow|katowice|szczecin|lublin|bydgoszcz|bialystok|rzeszow|opole|dublin|"
-                         r"anthropic\.com|luxembourg|london|amsterdam|berlin)", re.I)
-MERCHANTS = [  # шаблон в описании операции -> магазин (как в покупках)
+# город, склеенный с названием в описании операции карты; свои небольшие города — config.ini [bank] cities
+_LOCAL_CITIES = "".join("|" + re.escape(fold(c.strip())) for k, v in local_pairs("bank") if k == "cities"
+                        for c in v.split(",") if c.strip())
+CITY_PREFIX = re.compile(r"^(wroclaw|warszawa|poznan|lodz|gdansk|gdynia|krakow|katowice|szczecin|lublin|bydgoszcz|bialystok"
+                         r"|rzeszow|opole|dublin|kyiv|anthropic\.com|luxembourg|london|amsterdam|berlin" + _LOCAL_CITIES + ")", re.I)
+# для распознавания (правила, магазин) — шире: в выписке город склеен с названием («WarsawBOLT.EU», «NicosiaSA *V …»).
+# На названия позиций не влияет: по ним построены твои правила
+MATCH_PREFIX = re.compile(CITY_PREFIX.pattern[:-1] + r"|warsaw|kobierzyce|nicosia|difc|san jose|cork|paris|minsk|vilnius"
+                          r"|mountain view|legnica|walbrzych|torun|kielce|olsztyn|czestochowa|radom|zielona gora)", re.I)
+MERCHANTS = local_pairs("merchants") + [  # шаблон в описании операции -> магазин (как в покупках); свои — config.ini
     (r"kaufland", "Kaufland"), (r"lidl", "Lidl"), (r"allegro", "Allegro"), (r"biedronka", "Biedronka"),
     (r"zabka", "Żabka"), (r"koleo", "KOLEO"), (r"erecept", "Erecept"), (r"orange flex", "Orange Flex"),
     (r"doz apteka|doz\.pl", "DOZ.pl"), (r"super-pharm", "Super-Pharm"), (r"rossmann", "Rossmann"),
-    (r"\baction\b", "Action"), (r"carrefour", "Carrefour"), (r"auchan", "Auchan"), (r"anthropic|claude", "Anthropic"),
+    (r"\baction\b", "Action"), (r"carrefour", "Carrefour"), (r"\baldi\b", "ALDI"), (r"ikea", "IKEA"), (r"\bagata\b", "Agata"),
+    (r"\bshell\b", "Shell"), (r"\borlen\b", "Orlen"), (r"bolt\.eu|\bbolt\b", "Bolt"), (r"\buber\b", "Uber"),
+    (r"poczta polska", "Poczta Polska"), (r"vapebox", "Vapebox"), (r"urbancard", "Urbancard"), (r"auchan", "Auchan"), (r"anthropic|claude", "Anthropic"),
     (r"google play", "Google Play"), (r"google", "Google"), (r"vending", "Automat (vending)"),
     (r"city-?nav|jakdojade", "Jakdojade"), (r"media ?expert", "Media Expert"), (r"apteka", "Apteka"),
     (r"\bnetto\b", "Netto"), (r"\bdino\b", "Dino"), (r"pepco", "Pepco"), (r"mcdonald", "McDonald's"), (r"kfc", "KFC"),
 ]
-# категория по операции без чека: шаблон по «тип + получатель + описание» (fold) -> категория
-BANK_RULES = [
-    (r"eksploatac|media za|prad|gaz ziemny|woda i sciek", "Жильё/Коммунальные"),
-    (r"wynajmujacy|czynsz|za mieszkanie|najem lokal", "Жильё/Аренда"),
-    (r"czesne|studia|uczelni|legitymac|szkol", "Образование"),
-    (r"urzad skarbowy|urzad miasta|us-transfer|oplata skarbowa", "Налоги и сборы"),
-    (r"\bfee\b|card-fee|\binterest\b|oplata za prowadzenie|oplata - przelew|odsetek", "Банк и комиссии"),
-    (r"card-atm", "Переводы/Снятие наличных"),
-    (r"c2c", "Переводы/Людям"),
-    (r"biedronka|zabka|carrefour|auchan|\bnetto\b|\bdino\b|stokrotka|lewiatan|polomarket|kaufland|lidl", "Еда"),
-    (r"vending", "Еда/Снеки и орехи"),
-    (r"super-pharm|rossmann|hebe", "Гигиена и косметика"),
-    (r"apteka|doz", "Здоровье/Аптека"),
-    (r"erecept|medicover|lekarz|przychodnia", "Здоровье/Врачи"),
-    (r"vape|tyton|papieros", "Табак и вейп"),
-    (r"restaurac|bistro|pizza|kebab|mcdonald|kfc|burger|kawiarnia|\bcafe\b|sushi|pyszne|glovo|wolt", "Кафе и доставка"),
-    (r"koleo|jakdojade|city-?nav|\bmpk\b|bilet", "Транспорт/Общественный транспорт"),
-    (r"orlen|\bshell\b|circle k|\bbp\b", "Транспорт/Топливо"),
-    (r"\buber\b|\bbolt\b|freenow", "Транспорт/Такси"),
-    (r"orange|t-mobile|\bplay\b|plus gsm", "Связь и интернет"),
-    (r"google play|netflix|spotify|youtube|anthropic|claude|apple\.com|chatgpt|openai", "Подписки"),
-    (r"\baction\b|pepco|jysk|ikea|castorama|leroy", "Дом"),
-    (r"kino|cinema|teatr|bilety", "Развлечения"),
+# категория по операции без чека: шаблон по «тип + получатель + описание» (fold) -> ключ категории.
+# Свои правила (config.ini [bank_rules]) — первыми
+BANK_RULES = local_pairs("bank_rules") + [
+    (r"eksploatac|media za|prad|gaz ziemny|woda i sciek", "housing.utilities"),
+    (r"wynajmujacy|czynsz|za mieszkanie|najem lokal", "housing.rent"),
+    (r"czesne|studia|uczelni|legitymac|szkol", "education"),
+    (r"urzad skarbowy|urzad miasta|us-transfer|oplata skarbowa", "finance.taxes"),
+    (r"\bfee\b|card-fee|\binterest\b|oplata za prowadzenie|oplata - przelew|oplata miesieczna za karte|odsetek"
+     r"|oproc debetu", "finance.bank"),
+    (r"card-atm", "transfer.atm"),
+    # перевод на телефон: назначение — в заголовке («KINO», «DLA DŁUGU»), иначе — перевод человеку (не расход)
+    (r"c2c.*\b(kino|cinema)\b", "leisure.fun"),
+    (r"c2c.*\b(dlug\w*|zwrot\w*|pozycz\w*|oddaj\w*)\b", "transfer.debt"),
+    (r"c2c", "transfer.out"),
+    (r"biedronka|zabka|carrefour|auchan|\bnetto\b|\bdino\b|stokrotka|lewiatan|polomarket|kaufland|lidl|\baldi\b"
+     r"|best market|\bspar\b|intermarche", "food.nocheck"),
+    (r"vending", "food.snacks"),
+    (r"super-pharm|apteka|\bdoz\b|gdziepolek|ziko", "health.pharmacy"),  # Super-Pharm — по твоим покупкам это лекарства
+    (r"rossmann|\bhebe\b|drogeria natura", "health.hygiene"),
+    (r"erecept|medicover|lekarz|przychodnia|synevo|diagnostyka|luxmed|enel-med", "health.doctors"),
+    (r"vape|tyton|papieros", "vice.tobacco"),
+    (r"restaurac|bistro|pizza|kebab|mcdonald|kfc|burger|kawiarnia|\bcafe\b|sushi|pyszne|glovo|wolt", "leisure.cafe"),
+    (r"koleo|\bpkp\b|intercity|polregio|koleje|flixbus", "transport.intercity"),
+    (r"jakdojade|city-?nav|\bmpk\b|urbancard|bilet", "transport.city"),
+    (r"orlen|\bshell\b|circle k|\bbp\b|\bmol\b|amic", "transport.fuel"),
+    (r"\buber\b|\bbolt\b|freenow", "transport.taxi"),
+    # подписки раньше операторов связи: «Google Play» — не оператор Play
+    (r"google play|netflix|spotify|youtube|anthropic|claude|apple\.com|chatgpt|openai", "comms.subscriptions"),
+    (r"orange|t-mobile|\bplay\b|plus gsm", "comms.mobile"),
+    (r"ikea|agata|jysk|\bjula\b", "home.furniture"),
+    (r"castorama|leroy|obi\b|bricomarche|psb", "home.repair"),
+    (r"\baction\b|pepco|tedi|kik\b", "home"),
+    (r"kino|cinema|teatr|bilety", "leisure.fun"),
+    (r"poczta polska|inpost|\bdpd\b|\bdhl\b|orlen paczka", "other.delivery"),
+    (r"fundacja|donateo|zrzutka|pomagam|siepomaga", "leisure.gifts"),
 ]
-INCOME_RULES = [
-    (r"wynagrodzenie|pensja|premia", "Доходы/Зарплата"),
-    (r"glovo|wolt|uber|bolt", "Доходы/Подработка"),
-    (r"stypendium", "Доходы/Стипендия"),
-    (r"cash-in", "Переводы/Взнос наличных"),
-    (r"transfer-in|elixir-in|c2c", "Переводы/От людей"),
+INCOME_RULES = local_pairs("income_rules") + [  # свои (работодатель, подработка) — config.ini [income_rules]
+    (r"wynagrodzenie|pensja|premia", "income.salary"),
+    (r"glovo|wolt|uber|bolt", "income.side"),
+    (r"stypendium", "income.scholarship"),
+    (r"cash-in", "income.cash"),
+    (r"\b(dlug\w*|zwrot\w*|pozycz\w*|oddaj\w*)\b", "transfer.debt"),
+    (r"transfer-in|elixir-in|c2c", "transfer.in"),
 ]
 def ensure_categories(con):
-    categories.seed(con)  # дерево (в т.ч. категории банка) — в core/categories.py
-    have = {r["name"] for r in con.execute("PRAGMA table_info(bank_tx)")}
-    for col, kind in (("purchase_id", "TEXT"), ("category_id", "INTEGER"), ("category_source", "TEXT")):
-        if col not in have:
-            con.execute(f"ALTER TABLE bank_tx ADD COLUMN {col} {kind}")
-    con.commit()
+    categories.seed(con)  # дерево (в т.ч. категории банка) — в core/categories.py; колонки bank_tx — в core/db.py
 
 
 def card_labels() -> dict:
@@ -77,8 +97,17 @@ def card_labels() -> dict:
 
 
 def merchant_of(desc: str) -> str | None:
-    f = fold(desc)
+    f = fold(MATCH_PREFIX.sub("", desc or ""))
     return next((name for rx, name in MERCHANTS if re.search(rx, f)), None)
+
+
+def rule_text(t: dict) -> str:
+    """Текст операции для правил: тип + получатель + описание без склеенного города и без «OD: … DO: …»."""
+    desc = MATCH_PREFIX.sub("", t.get("description") or "").strip()
+    desc = re.sub(r"(PL|IE|UA|LU|GB|DE|NL|US|CY|AE)$", "", desc)
+    if "C2C" in (t.get("type") or ""):  # перевод на телефон: «KINOOD: 48500000000 DO: 485*****000» -> «KINO»
+        desc = re.sub(r"\s*OD: ?[\d*]+.*$", "", desc)
+    return " ".join(filter(None, [t.get("type"), t.get("counterparty"), desc]))
 
 
 def clean_desc(desc: str) -> str:
@@ -98,18 +127,87 @@ def day(s: str) -> dt.date:
 
 
 def reconcile(verbose=True):
-    """Каждый запуск начинается с чистых сумм: мягкая сверка пересчитывает позиции под банк,
-    поэтому сначала пересобираем покупки из исходников (чеки, письма) — это быстро."""
+    """Полная пересборка: покупки из исходников (чеки Lidl/Kaufland, письма) и сверка с банком."""
     from receipts import kaufland, lidl, mail_orders
     lidl.reparse()
     kaufland.reparse()
     mail_orders.parse_all(verbose=False)
+    return match(verbose)
+
+
+def refund_origin(con, t) -> dict | None:
+    """Исходная покупка возврата на карту: за 90 дней до него — покупка той же суммы, иначе покупка с позицией
+    такой суммы (вернул один товар из заказа). Свой магазин, полное совпадение и найденные в банке — в приоритете."""
+    amount = round(t["amount"], 2)
+    cands = []
+    for r in con.execute("""SELECT p.id, p.merchant, p.date, p.total, p.bank_tx_id, i.name,
+                                   round(i.amount - coalesce(i.discount, 0), 2) v
+                            FROM purchases p JOIN items i ON i.purchase_id = p.id
+                            WHERE p.total > 0 AND date(p.date) BETWEEN date(?, '-90 day') AND date(?)
+                            ORDER BY i.amount DESC""", (t["date"], t["date"])):
+        whole = abs(r["total"] - amount) < 0.005
+        if whole or (amount >= 5 and abs(r["v"] - amount) < 0.005):
+            same = t["merchant"] is not None and r["merchant"] == t["merchant"]
+            cands.append(((same, whole, r["bank_tx_id"] is not None, r["date"]), r))
+    if not cands:
+        return None
+    _, r = max(cands, key=lambda c: c[0])
+    return {"id": r["id"], "item": r["name"]}
+
+
+def migrate_rules_v2(con):
+    """Разово: правила «по названию», созданные для операций банка (названия уникальны: номер BLIK, заказа, точки),
+    становятся правилом по магазину или — если магазина нет или правила спорят — ручной категорией этих операций."""
+    from core.db import get_meta, set_meta
+    if get_meta(con, "rules_v2"):
+        return
+    K = categories.key_ids(con)
+    food = K.get("food")
+    plan = {}
+    for r in con.execute("SELECT id, pattern, category_id FROM rules WHERE target = 'item' AND pattern IS NOT NULL").fetchall():
+        rx = re.compile(r["pattern"])
+        hits = [x for x in con.execute("SELECT i.purchase_id, i.line, i.name, p.merchant, p.source FROM items i "
+                                       "JOIN purchases p ON p.id = i.purchase_id").fetchall() if rx.search(fold(x["name"]))]
+        if hits and all(x["source"] == "bank" for x in hits):
+            plan[r["id"]] = (r["category_id"], hits)
+    # правило на весь магазин — только если там больше одной покупки, категории не спорят и у магазина нет чеков
+    # (иначе «Kaufland → хозтовары» задело бы нераспознанные позиции чеков Kaufland)
+    with_receipts = {categories.shop_key(r["merchant"]) for r in con.execute(
+        "SELECT DISTINCT merchant FROM purchases WHERE source != 'bank'")}
+    by_shop, buys = {}, {}
+    for rid, (cat, hits) in plan.items():
+        for x in hits:
+            if x["merchant"] not in categories.PLACEHOLDER_SHOPS and not re.search(r"\d{6,}", x["name"]):
+                key = categories.shop_key(x["merchant"])
+                by_shop.setdefault(key, set()).add(cat)
+                buys.setdefault(key, set()).add(x["purchase_id"])
+    shop_ok = {k for k, cats in by_shop.items() if len(cats) == 1 and len(buys[k]) > 1 and k not in with_receipts}
+    for rid, (cat, hits) in plan.items():
+        for x in hits:
+            key = categories.shop_key(x["merchant"])
+            if x["merchant"] in categories.PLACEHOLDER_SHOPS or re.search(r"\d{6,}", x["name"]) or key not in shop_ok:
+                con.execute("UPDATE items SET category_id = ?, category_source = 'manual' WHERE purchase_id = ? AND line = ?",
+                            (cat, x["purchase_id"], x["line"]))
+            else:  # «Еда» целиком у магазина без чека — теперь «Продукты без чека»
+                categories.add_shop_rule(con, x["merchant"], K.get("food.nocheck", cat) if cat == food else cat)
+        con.execute("DELETE FROM rules WHERE id = ?", (rid,))
+    set_meta(con, "rules_v2", "1")
+    con.commit()
+
+
+def match(verbose=True):
+    """Сверка с банком на уже собранных покупках. Можно запускать сколько угодно раз: суммы, подогнанные
+    под банк в прошлый раз (мягкая сверка, валюта), сначала возвращаются к суммам из чека."""
     con = connect()
     from receipts import photos
     if merged := photos.merge_duplicates(con):
         print(f"Фото чеков, совпавших с электронными чеками, прикреплено: {merged}")
     ensure_categories(con)
-    ids = categories.ids_by_path(con)
+    K = categories.key_ids(con)
+    con.execute("UPDATE items SET amount = orig_amount, unit_price = orig_unit_price, discount = orig_discount, "
+                "orig_amount = NULL, orig_unit_price = NULL, orig_discount = NULL WHERE orig_amount IS NOT NULL")
+    con.execute("UPDATE purchases SET total = orig_total, orig_total = NULL WHERE orig_total IS NOT NULL")
+    con.execute("UPDATE purchases SET status = NULL, refund_of = NULL")
     # пометки прошлой сверки убираем (примечания разбора — курс валюты, «без подтверждения» — остаются)
     marks = ("проверить: в банке", "не со счёта PKO", "оплачено: ", "оплачено вместе", "оплачено по банку", "→ по банку")
     for r in con.execute("SELECT id, note FROM purchases WHERE note IS NOT NULL").fetchall():
@@ -117,7 +215,6 @@ def reconcile(verbose=True):
         parts = [s.split(" → по банку")[0] for s in parts]
         con.execute("UPDATE purchases SET note = ? WHERE id = ?", ("; ".join(parts) or None, r["id"]))
     con.execute("UPDATE purchases SET bank_tx_id = NULL WHERE source != 'bank'")
-    con.execute("UPDATE bank_tx SET purchase_id = NULL")
     # ручные правки категорий у операций банка переживают пересборку
     manual_bank = {r["purchase_id"]: r["category_id"] for r in con.execute(
         "SELECT purchase_id, category_id FROM items WHERE purchase_id LIKE 'bank:%' AND category_source = 'manual'")}
@@ -132,6 +229,18 @@ def reconcile(verbose=True):
     purchases = [dict(r) for r in con.execute(
         "SELECT id, date, merchant, total, payment_method, note, card_last4 FROM purchases "
         "WHERE total IS NOT NULL AND total > 0")]
+
+    def scale(pid, total):
+        """Сумма покупки — как списал банк; сумма из чека запоминается (orig_*) для следующей сверки."""
+        was = con.execute("SELECT total FROM purchases WHERE id = ?", (pid,)).fetchone()["total"]
+        k = total / was
+        con.execute("UPDATE items SET orig_amount = coalesce(orig_amount, amount), "
+                    "orig_unit_price = coalesce(orig_unit_price, unit_price), "
+                    "orig_discount = CASE WHEN orig_amount IS NULL THEN discount ELSE orig_discount END WHERE purchase_id = ?",
+                    (pid,))
+        con.execute("UPDATE items SET amount = round(amount * ?, 2), unit_price = round(unit_price * ?, 2), "
+                    "discount = round(discount * ?, 2) WHERE purchase_id = ?", (k, k, k, pid))
+        con.execute("UPDATE purchases SET orig_total = coalesce(orig_total, total), total = ? WHERE id = ?", (total, pid))
 
     # 1. пары «покупка ↔ операция»: сначала с совпадением продавца, затем по ближайшей дате
     pairs = []
@@ -159,21 +268,17 @@ def reconcile(verbose=True):
         used_p.add(p["id"])
         used_t.add(t["id"])
         con.execute("UPDATE purchases SET bank_tx_id = ? WHERE id = ?", (t["id"], p["id"]))
-        con.execute("UPDATE bank_tx SET purchase_id = ? WHERE id = ?", (p["id"], t["id"]))
         if "по курсу" in (p["note"] or "") and abs(-t["amount"] - p["total"]) >= 0.01:
             # валютная покупка: фактическая сумма — из банка
-            k = -t["amount"] / p["total"]
-            con.execute("UPDATE items SET amount = round(amount * ?, 2), unit_price = round(unit_price * ?, 2) "
-                        "WHERE purchase_id = ?", (k, k, p["id"]))
-            con.execute("UPDATE purchases SET total = ?, note = note || ' → по банку ' || ? WHERE id = ?",
-                        (-t["amount"], f"{-t['amount']:.2f} zł", p["id"]))
+            scale(p["id"], -t["amount"])
+            con.execute("UPDATE purchases SET note = note || ' → по банку ' || ? WHERE id = ?",
+                        (f"{-t['amount']:.2f} zł", p["id"]))
         matched += 1
 
     def link(p, t, note=None):
         used_p.add(p["id"])
         used_t.add(t["id"])
         con.execute("UPDATE purchases SET bank_tx_id = ? WHERE id = ?", (t["id"], p["id"]))
-        con.execute("UPDATE bank_tx SET purchase_id = coalesce(purchase_id || ',', '') || ? WHERE id = ?", (p["id"], t["id"]))
         if note:
             con.execute("UPDATE purchases SET note = coalesce(note || '; ', '') || ? WHERE id = ?", (note, p["id"]))
 
@@ -210,9 +315,7 @@ def reconcile(verbose=True):
         if p["id"] in used_p or t["id"] in used_t:
             continue
         k = -t["amount"] / p["total"]
-        con.execute("UPDATE items SET amount = round(amount * ?, 2), unit_price = round(unit_price * ?, 2), "
-                    "discount = round(discount * ?, 2) WHERE purchase_id = ?", (k, k, k, p["id"]))
-        con.execute("UPDATE purchases SET total = ? WHERE id = ?", (-t["amount"], p["id"]))
+        scale(p["id"], -t["amount"])
         link(p, t, None if abs(k - 1) < 0.001 else f"в заказе {p['total']:.2f} zł, оплачено по банку {-t['amount']:.2f} zł")
         matched += 1
 
@@ -239,10 +342,7 @@ def reconcile(verbose=True):
         new = [round(p["total"] * paid / was, 2) for p in c]
         new[-1] = round(paid - sum(new[:-1]), 2)  # копейки округления — в последний заказ, чтобы сумма сошлась с банком
         for p, total in zip(c, new):
-            k = total / p["total"]
-            con.execute("UPDATE items SET amount = round(amount * ?, 2), unit_price = round(unit_price * ?, 2), "
-                        "discount = round(discount * ?, 2) WHERE purchase_id = ?", (k, k, k, p["id"]))
-            con.execute("UPDATE purchases SET total = ? WHERE id = ?", (total, p["id"]))
+            scale(p["id"], total)
             link(p, t, f"заказы на {was:.2f} zł оплачены вместе одной операцией {paid:.2f} zł")
         matched += len(c)
 
@@ -254,21 +354,40 @@ def reconcile(verbose=True):
                    WHERE bank_tx_id IS NOT NULL AND source != 'bank' AND coalesce(payment_method, '') NOT IN ('deferred', 'cash')
                      AND (source = 'email' OR coalesce(payment_method, '') = '')""")
 
+    # «под вопросом»: регистрация платежа (Przelewy24/PayU) без подтверждения, которой нет в выписке, хотя выписка
+    # этот день уже покрывает (+5 дней на проводку), или повтор той же суммы тому же магазину в пределах 10 минут.
+    # Неоплаченную регистрацию платёжная система отменяет сама. В суммы не идёт, пока ты не подтвердишь
+    # («оплачено» — другой картой) или не удалишь.
+    confirmed = {r["id"] for r in con.execute("SELECT id FROM confirmed_purchases")}
+    first_day = day(txs[0]["date"]) if txs else None
+    last_day = day(max(t["date"] for t in txs)) if txs else None
+    regs = [p for p in purchases if "без подтверждения" in (p["note"] or "")]
+    doubts = []
+    for p in regs:
+        if p["id"] in used_p or p["id"] in confirmed:
+            continue
+        covered = bool(txs) and first_day <= day(p["date"]) <= last_day - dt.timedelta(days=5)
+        twin = any(q is not p and q["merchant"] == p["merchant"] and abs(q["total"] - p["total"]) < 0.005
+                   and 0 < (dt.datetime.fromisoformat(p["date"]) - dt.datetime.fromisoformat(q["date"])).total_seconds() <= 600
+                   for q in regs)
+        if covered or twin:
+            doubts.append(p["id"])
+    con.executemany("UPDATE purchases SET status = 'doubt' WHERE id = ?", [(i,) for i in doubts])
+
     # 2. операции без чека -> покупки «банк»; доходы и переводы — категории в bank_tx
-    by_total = {}
-    for p in purchases:
-        by_total.setdefault(round(p["total"], 2), []).append(p)
-    made = refunds = 0
+    shops = categories.shop_rules(con)
+    made, refunds = 0, []
     for t in txs:
         if t["id"] in used_t:
             continue
-        text = " ".join(filter(None, [t["type"], t["counterparty"], t["description"]]))
+        text = rule_text(t)
         if t["amount"] > 0 and "RETURN" not in (t["type"] or ""):
             if t.get("category_source") == "manual":
                 continue  # твоя правка категории поступления сохраняется
-            path = rule_category(text, INCOME_RULES)
-            con.execute("UPDATE bank_tx SET category_id = ?, category_source = 'rule' WHERE id = ?",
-                        (ids.get(path), t["id"]))
+            cid = shops.get(categories.shop_key(t["counterparty"]))  # твоё правило «все переводы от этого человека»
+            if cid is None:
+                cid = K.get(rule_category(text, INCOME_RULES))
+            con.execute("UPDATE bank_tx SET category_id = ?, category_source = 'rule' WHERE id = ?", (cid, t["id"]))
             continue
         name = t["counterparty"] or clean_desc(t["description"] or "")
         if t["type"] and t["type"].startswith("MOBILE-PAYMENT-POS"):
@@ -279,19 +398,10 @@ def reconcile(verbose=True):
                 name = f"Карта: {name}"
         if t["counterparty"] and t["description"] and t["type"] and "C2C" not in t["type"]:
             name = f"{t['counterparty']}: {t['description']}"
-        path = rule_category(text, BANK_RULES)
+        cid = K.get(rule_category(text, BANK_RULES))
         amount = -t["amount"]
-        if t["amount"] > 0:  # возврат на карту: ищем исходную покупку той же суммы за 90 дней
-            refunds += 1
-            orig = next((p for p in by_total.get(round(t["amount"], 2), [])
-                         if 0 <= (day(t["date"]) - day(p["date"])).days <= 90), None)
-            if orig:
-                row = con.execute("SELECT i.name, i.category_id FROM items i WHERE i.purchase_id = ? ORDER BY i.amount DESC",
-                                  (orig["id"],)).fetchone()
-                name = f"Возврат: {row['name']}" if row else f"Возврат: {orig['merchant']}"
-                path = categories.paths(con).get(row["category_id"]) if row and row["category_id"] else path
-            else:
-                name = f"Возврат: {name}"
+        if t["amount"] > 0:  # возврат на карту: исходную покупку ищем, когда созданы все операции (может быть в тот же день)
+            name = f"Возврат: {name}"
         method = {"CARD-PAYMENT": "card", "CARD-ATM": "card", "CARD-PAYMENT-RETURN": "card"}.get(
             t["type"], "blik" if (t["type"] or "").startswith("MOBILE-PAYMENT") else "transfer")
         pid = f"bank:{t['id']}"
@@ -303,13 +413,20 @@ def reconcile(verbose=True):
                             "store": t["description"], "total": amount, "payment_method": method, "discount": 0},
                       [{"name": name[:120], "product_code": None, "qty": 1, "unit_price": amount, "amount": amount,
                         "discount": None}])
-        cid = ids.get(path) if path else None
         src = "bank" if cid else None
         if pid in manual_bank:
             cid, src = manual_bank[pid], "manual"
         con.execute("UPDATE items SET category_id = ?, category_source = ? WHERE purchase_id = ?", (cid, src, pid))
         con.execute("UPDATE purchases SET bank_tx_id = ? WHERE id = ?", (t["id"], pid))
+        if t["amount"] > 0:
+            refunds.append((pid, t))
         made += 1
+    for pid, t in refunds:  # категорию даст исходная покупка (см. categorize)
+        if orig := refund_origin(con, t):
+            con.execute("UPDATE items SET name = ? WHERE purchase_id = ?", (f"Возврат: {orig['item']}"[:120], pid))
+            # магазин — как у исходной покупки: фильтр по магазину показывает сумму за вычетом возврата
+            con.execute("UPDATE purchases SET refund_of = ?, merchant = (SELECT merchant FROM purchases WHERE id = ?) "
+                        "WHERE id = ?", (orig["id"], orig["id"], pid))
 
     # карты другого счёта: по карте ни одного совпадения при 5+ покупках в период выписки
     first = txs[0]["date"] if txs else ""
@@ -338,6 +455,7 @@ def reconcile(verbose=True):
                         (f"проверить: в банке {t['date']} операция {p['merchant']} на {-t['amount']:.2f} zł без чека "
                          f"— возможно, это эта покупка (тогда трата посчитана дважды)", p["id"]))
 
+    migrate_rules_v2(con)
     from core import wallet
     wallet.rebuild(con)  # взносы наличных (доход/перенос), траты наличными без чека
 
@@ -354,5 +472,7 @@ def reconcile(verbose=True):
         print(f"Покупок (не наличные) до {last}: {len(after)}, найдено в банке: {matched}")
         miss = [p for p in after if p["id"] not in used_p and p["date"][:10] >= (txs[0]["date"] if txs else "")]
         print(f"Не найдено в банке: {len(miss)} (оплата другой картой/счётом, наличными или сумма отличается)")
-        print(f"Операций банка без чека: {made} (из них возвратов: {refunds})")
+        print(f"Операций банка без чека: {made} (из них возвратов: {len(refunds)})")
+        if doubts:
+            print(f"Под вопросом (регистрация платежа без оплаты в банке): {len(doubts)}")
     return matched, made

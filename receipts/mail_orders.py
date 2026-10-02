@@ -11,7 +11,7 @@ from itertools import combinations
 
 import requests
 
-from core.common import DATA, money, num
+from core.common import local_pairs, DATA, money, num
 from core.db import connect, save_purchase
 from receipts import mail_parse as MP
 from receipts.mail import db as mail_db
@@ -44,7 +44,8 @@ def find_after(lines, label_rx, span=4):
 # ---------------------------------------------------------------- Allegro
 
 def parse_allegro(lines: list[str]) -> dict | None:
-    """«Kupiłeś i zapłaciłeś»: блоки «od <продавец>» -> товары «название / (номер оферты) / цена» -> доставка."""
+    """«Kupiłeś i zapłaciłeś» и «Zapłaciłeś … za:» (оплата позже покупки): блоки «od <продавец>» ->
+    товары «название / (номер оферты) / цена» -> доставка; итог — «Płatność» или «KWOTA WPŁATY»."""
     if not any(ln.startswith("Numer płatności") for ln in lines):
         return None
     items, n = [], 0
@@ -64,8 +65,10 @@ def parse_allegro(lines: list[str]) -> dict | None:
         elif re.match(r"^(Usługa|Opłata|Ubezpieczenie|Pakiet)\b", ln) and n + 1 < len(lines) and amt(lines[n + 1]):
             fee = amt(lines[n + 1])  # «Usługa Allegro Smart! 12 miesięcy 39,90 zł» — куплено вместе с заказом
             items.append({"name": ln, "product_code": None, "qty": 1, "unit_price": fee, "amount": fee, "discount": None})
-        elif re.match(r"^(Kupon|Rabat|Obniżka|Monety)", ln) and n + 1 < len(lines) and (amt(lines[n + 1]) or 0) < 0:
-            disc = abs(amt(lines[n + 1]))  # «Kupon za Smart! Monety ... -4,00 zł» — скидка на товары продавца выше
+        elif re.match(r"^(Kupon|Rabat|Obniżka|Monety)", ln) and n + 1 < len(lines) \
+                and ((amt(lines[n + 1]) or 0) < 0 or "o wartości" in ln and amt(lines[n + 1])):
+            # «Kupon za Smart! Monety ... -4,00 zł»; в письме «Zapłaciłeś» — «… o wartości 3,00 zł» / «3,00 zł»
+            disc = abs(amt(lines[n + 1]))
             target = next((i for i in reversed(items) if not i["name"].startswith("Dostawa")), None)
             if target:
                 target["discount"] = round((target["discount"] or 0) + disc, 2)
@@ -77,12 +80,37 @@ def parse_allegro(lines: list[str]) -> dict | None:
                               "amount": cost, "discount": None})
         n += 1
     total = find_after(lines, r"^Płatność$", 2)
+    if total is None:
+        total = find_after(lines, r"^KWOTA WPŁATY$", 1)
     method_line = next((lines[i + 1] for i, ln in enumerate(lines) if ln == "Metoda płatności" and i + 1 < len(lines)), "")
     paid_at = next((MP.polish_date(ln) for ln in lines if ln.startswith("przekazana")), None)
     order = next((lines[i + 1] for i, ln in enumerate(lines) if ln == "Numer płatności" and i + 1 < len(lines)), None)
     sellers = [lines[i][3:] for i, ln in enumerate(lines) if ln.startswith("od ") and len(ln) < 40]
     return {"order": order, "items": items, "total": total, "payment": MP.payment_method(method_line),
             "payment_label": method_line, "date": paid_at, "store": ", ".join(dict.fromkeys(sellers))}
+
+
+def parse_allegro_lokalnie(lines: list[str]) -> dict | None:
+    """Allegro Lokalnie «Dziękujemy za wpłatę»: «Kupiony przedmiot» -> название, цена, «N sztuka»; итог, номер платежа."""
+    if "Kupiony przedmiot" not in lines or not any(ln.startswith("Nr płatności:") for ln in lines):
+        return None  # уведомления о доставке («Przesyłka w drodze») повторяют товар — покупка только письмо об оплате
+    i = lines.index("Kupiony przedmiot") + 1
+    while i < len(lines) and lines[i].lower() in ("kup teraz", "licytacja"):
+        i += 1
+    name = lines[i] if i < len(lines) else "Покупка Allegro Lokalnie"
+    price = next((amt(lines[k]) for k in range(i + 1, min(i + 3, len(lines))) if amt(lines[k]) is not None), None)
+    qty = next((float(m.group(1)) for k in range(i + 1, min(i + 4, len(lines)))
+                if (m := re.match(r"(\d+)\s*sztuk", lines[k])) ), 1.0)
+    total = find_after(lines, r"^Łączna kwota zakupu$", 1)
+    delivery = next((amt(ln) for ln in lines if ln.startswith("w tym dostawa")), None)
+    items = [{"name": name, "product_code": None, "qty": qty, "unit_price": round(price / qty, 2) if price else None,
+              "amount": price, "discount": None}]
+    if delivery:
+        items.append({"name": "Dostawa", "product_code": None, "qty": 1, "unit_price": delivery, "amount": delivery,
+                      "discount": None})
+    order = next((ln.split(":", 1)[1].strip() for ln in lines if ln.startswith("Nr płatności:")), None)
+    # магазин — Allegro: платёж идёт через Allegro Finance, в выписке «Allegro» — так покупка найдёт свою операцию
+    return {"order": order, "items": items, "total": total, "payment": None, "payment_label": "", "store": "Allegro Lokalnie"}
 
 
 # ---------------------------------------------------------------- Koleo
@@ -190,8 +218,11 @@ def parse_generic(lines, subject) -> dict | None:
         elif re.match(r"^Ilość\s*:\s*(\d+)", ln) and n >= 3:
             qty = num(re.match(r"^Ilość\s*:\s*(\d+)", ln).group(1))
             price = find_after(lines[n:n + 4], r"Cena za sztukę", 2)
-            name = next((lines[k] for k in range(n - 1, max(n - 6, -1), -1)
-                         if not re.match(r"^(Kod produktu|Cena|Ilość|\d+)\b", lines[k]) and len(lines[k]) > 6), lines[n - 3])
+            # название — строка перед «Kod produktu»; между ними бывает срок «Dostawa 2-5 dni» — это не товар
+            name = next((lines[k - 1] for k in range(n - 1, max(n - 8, 0), -1) if lines[k].startswith("Kod produktu")), None) \
+                or next((lines[k] for k in range(n - 1, max(n - 6, -1), -1)
+                         if not re.match(r"^(Kod produktu|Cena|Ilość|Dostawa|Wysyłka|Dostępn|Sprzedawca|\d+)\b", lines[k])
+                         and len(lines[k]) > 6), lines[n - 3])
             if price:
                 items.append({"name": name, "product_code": None, "qty": qty, "unit_price": price,
                               "amount": round(qty * price, 2), "discount": None})
@@ -213,10 +244,12 @@ def parse_generic(lines, subject) -> dict | None:
 
 # ---------------------------------------------------------------- платёжные посредники
 
-PAYEES = [(r"city-?nav|jakdojade", "Jakdojade"), (r"astarium|koleo", "KOLEO"), (r"erecept", "Erecept"),
-          (r"grupa olx|\bolx\b", "OLX"), (r"apo-discounter", "Apo-Discounter"),
-          (r"allegro", "Allegro"), (r"doz\b|doz\.pl", "DOZ.pl"), (r"modivo", "Modivo"), (r"zalando", "Zalando"),
-          (r"medicover", "Medicover")]
+# получатель платежа в письмах посредников -> магазин; свои (вуз и т.п.) — config.ini [mail_payees]
+PAYEES = local_pairs("mail_payees") + [
+    (r"city-?nav|jakdojade", "Jakdojade"), (r"astarium|koleo", "KOLEO"), (r"erecept", "Erecept"),
+    (r"grupa olx|\bolx\b", "OLX"), (r"apo-discounter", "Apo-Discounter"),
+    (r"allegro", "Allegro"), (r"doz\b|doz\.pl", "DOZ.pl"), (r"modivo", "Modivo"), (r"zalando", "Zalando"),
+    (r"medicover", "Medicover")]
 CONFIRMED_RX = re.compile(r"potwierdzeni|confirmation|zaksięgowan|zaksiegowan|przekazaliśmy|completed|zrealizowan", re.I)
 
 
@@ -265,13 +298,14 @@ def nbp_rate(currency: str, date: str) -> float | None:
 
 # ---------------------------------------------------------------- сборка
 
-MERCHANT_NAMES = {"allegro.pl": "Allegro", "allegromail.pl": "Allegro", "allegrolokalnie.pl": "Allegro Lokalnie",
+# домен писем -> магазин; свои нишевые магазины — config.ini [mail_domains]
+MERCHANT_NAMES = {"allegro.pl": "Allegro", "allegromail.pl": "Allegro", "allegrolokalnie.pl": "Allegro",
                   "koleo.pl": "KOLEO", "doz.pl": "DOZ.pl", "mediaexpert.pl": "Media Expert", "apo-discounter.pl": "Apo-Discounter",
                   "zalando.pl": "Zalando", "modivo.pl": "Modivo", "eobuwie.pl": "eobuwie", "gdziepolek.pl": "GdziePoLek",
                   "olx.pl": "OLX", "ebay.com": "eBay", "synevo.pl": "Synevo", "apteline.pl": "Apteline", "temu.com": "Temu",
                   "erecept.pl": "Erecept", "anthropic.com": "Anthropic", "orange.com": "Orange Flex",
                   "amazon.pl": "Amazon", "empik.com": "Empik", "euro.com.pl": "RTV Euro AGD", "x-kom.pl": "x-kom",
-                  "aliexpress.com": "AliExpress", "pyszne.pl": "Pyszne.pl"}
+                  "aliexpress.com": "AliExpress", "pyszne.pl": "Pyszne.pl"} | dict(local_pairs("mail_domains"))
 REFUND_RX = re.compile(r"zwrot|refund|anulowan|cancel", re.I)
 
 
@@ -296,8 +330,10 @@ def parse_all(verbose=True):
         if REFUND_RX.search(subject) and dom != "allegro.pl":
             continue  # письма о возвратах — отдельная задача (учёт отрицательных сумм), пока пропускаем
         p = None
-        if dom == "allegro.pl" and subject.startswith("Kupiłeś i zapłaciłeś"):
+        if dom == "allegro.pl" and subject.startswith(("Kupiłeś i zapłaciłeś", "Zapłaciłeś")):
             p = parse_allegro(lines)
+        elif dom == "allegrolokalnie.pl":
+            p = parse_allegro_lokalnie(lines)
         elif dom == "allegro.pl":
             continue  # уведомления о доставке, оценках, ценах
         elif dom == "koleo.pl":

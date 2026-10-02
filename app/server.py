@@ -16,9 +16,28 @@ app = Flask(__name__, static_folder=None)
 STATIC = BUDGET / "app" / "static"
 
 
+ALLOWED_HOSTS = {f"{HOST}:{PORT}", f"localhost:{PORT}"}
+
+
+@app.before_request
+def local_only():
+    """Только этот компьютер. Чужой сайт в браузере не прочитает данные через подмену DNS (проверка Host)
+    и не отправит команду формой: POST принимается только как JSON — такой запрос с чужого сайта браузер не пустит."""
+    if request.host not in ALLOWED_HOSTS:
+        return "нет доступа", 403
+    if request.method == "POST" and not request.is_json:
+        return jsonify(ok=False, error="ожидается JSON"), 415
+
+
 @app.get("/")
 def index():
-    return send_from_directory(STATIC, "index.html")
+    return send_from_directory(STATIC, "index.html", max_age=0)
+
+
+@app.get("/static/<path:rel>")
+def static_file(rel):
+    """Стили и скрипты интерфейса; max_age=0 — после обновления кода браузер не держит старую версию."""
+    return send_from_directory(STATIC, rel, max_age=0)
 
 
 @app.get("/file/<path:rel>")
@@ -43,9 +62,8 @@ def file(rel):
 
 @app.get("/api/data")
 def data():
-    con = connect()
-    categories.seed(con)
-    cats = [dict(r) for r in con.execute("SELECT id, parent_id, name, kind FROM categories ORDER BY id")]
+    con = connect()  # только чтение: дерево категорий создаётся при запуске сервера и при пересчёте категорий
+    cats = [dict(r) for r in con.execute("SELECT id, parent_id, name, kind, key FROM categories ORDER BY id")]
     cat_paths = categories.paths(con)
     for c in cats:
         c["path"] = cat_paths[c["id"]]
@@ -70,6 +88,7 @@ def data():
         "pay": p["payment_method"], "card": p["card_last4"], "items": items.get(p["id"], []),
         "note": p["note"], "file": p["raw_path"] if p["source"] in ("photo", "email") else None,
         "bt": p["bank_tx_id"] is not None, "bank": bank_info.get(p["bank_tx_id"]), "photos": photos.get(p["id"], []),
+        "status": p["status"], "refund_of": p["refund_of"], "orig_total": p["orig_total"],
     } for p in con.execute("SELECT * FROM purchases WHERE date <> '' ORDER BY date")]
     return jsonify({
         "purchases": purchases, "categories": cats,
@@ -79,9 +98,10 @@ def data():
                  "update_last": json.loads(get_meta(con, "update_last") or "null"),
                  "update_running": update.is_running(), "bank_days_left": update.consent_days_left(),
                  "deals": _deals_summary()},
+        "incomes": _incomes(con),
         "hidden": [dict(r) for r in con.execute("SELECT id, source, label, created FROM hidden_purchases ORDER BY created DESC")],
         "rules": [dict(r) | {"path": cat_paths.get(r["category_id"])} for r in con.execute(
-            "SELECT id, pattern, product_code, category_id, source, created FROM rules ORDER BY id DESC")],
+            "SELECT id, target, pattern, product_code, category_id, source, created FROM rules ORDER BY id DESC")],
     })
 
 
@@ -91,9 +111,8 @@ def bank():
     con = connect()
     cat_paths = categories.paths(con)
     kinds = {r["id"]: r["kind"] for r in con.execute("SELECT id, kind FROM categories")}
-    have_cols = {r["name"] for r in con.execute("PRAGMA table_info(bank_tx)")}
-    if "category_id" not in have_cols:
-        return jsonify({"empty": True})
+    K = categories.key_ids(con)
+    tops = {cid: top for cid, top in _top_groups(con).items()}
     balance = {}
     # остаток на конец дня: внутри дня порядок — по номеру операции в банке (id «счёт:O;382»)
     for r in con.execute("SELECT date, balance FROM bank_tx WHERE balance IS NOT NULL "
@@ -101,7 +120,7 @@ def bank():
         balance[r["date"]] = r["balance"]
     income = {}
     for r in con.execute("SELECT date, amount, category_id, counterparty, description FROM bank_tx "
-                         "WHERE amount > 0 AND purchase_id IS NULL AND type NOT LIKE '%RETURN%'"):
+                         "WHERE amount > 0 AND type NOT LIKE '%RETURN%'"):
         m = r["date"][:7]
         path = cat_paths.get(r["category_id"], "Прочие поступления")
         income.setdefault(m, {}).setdefault(path, 0)
@@ -109,9 +128,10 @@ def bank():
     months = {}
     for r in con.execute("""SELECT substr(p.date, 1, 7) m, p.source, p.payment_method pay, p.bank_tx_id bt,
                                    sum(i.amount - coalesce(i.discount, 0)) v, i.category_id cid
-                            FROM purchases p JOIN items i ON i.purchase_id = p.id GROUP BY p.id, i.line"""):
+                            FROM purchases p JOIN items i ON i.purchase_id = p.id
+                            WHERE coalesce(p.status, '') != 'doubt' GROUP BY p.id, i.line"""):
         if kinds.get(r["cid"]) in ("transfer", "income"):
-            if cat_paths.get(r["cid"]) == "Переводы/Снятие наличных":
+            if r["cid"] is not None and r["cid"] == K.get("transfer.atm"):
                 months.setdefault(r["m"], {}).setdefault("atm", 0)
                 months[r["m"]]["atm"] += r["v"]
             continue
@@ -120,12 +140,9 @@ def bank():
         key = "bank_only" if r["source"] == "bank" else "cash" if r["pay"] == "cash" else "receipts" if r["bt"] else "other"
         s[key] = round(s.get(key, 0) + r["v"], 2)
         # «покупки»: без аренды, учёбы, налогов и комиссий — на них чеков не бывает в принципе
-        top = (cat_paths.get(r["cid"]) or "").split("/")[0]
-        if top not in ("Жильё", "Образование", "Финансы") and key in ("receipts", "bank_only"):
+        no_receipts = {K.get(k) for k in ("housing", "education", "finance")} - {None}
+        if tops.get(r["cid"]) not in no_receipts and key in ("receipts", "bank_only"):
             s["shop_" + key] = round(s.get("shop_" + key, 0) + r["v"], 2)
-    from core import wallet
-    for m, v in wallet.income_by_month(wallet.db()).items():  # доход наличными: твои записи + плюс при пересчёте
-        income.setdefault(m, {})["Доходы/Наличные"] = round(income.get(m, {}).get("Доходы/Наличные", 0) + v, 2)
     session = {}
     try:
         import json as _json
@@ -133,18 +150,32 @@ def bank():
         session = _json.loads(SESSION.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         pass
-    # поступления списком (для таблицы под графиком): выписка + записи кошелька «доход наличными»
-    incomes = [{"id": r["id"], "date": r["date"], "amount": r["amount"], "who": r["counterparty"] or "",
-                "desc": r["description"] or "", "cat": r["category_id"], "src": r["category_source"]}
-               for r in con.execute("SELECT * FROM bank_tx WHERE amount > 0 AND purchase_id IS NULL "
-                                    "AND type NOT LIKE '%RETURN%' ORDER BY date DESC")]
-    for e in wallet.timeline(wallet.db())["events"]:
-        if e["kind"] == "income" or (e["kind"] == "count" and (e.get("diff") or 0) < 0):
-            incomes.append({"id": None, "date": e["date"][:10], "amount": e["amount"] if e["kind"] == "income" else -e["diff"],
-                            "who": "наличные", "desc": e["note"] or ("неучтённый доход по пересчёту" if e["kind"] == "count" else ""),
-                            "cat": categories.ids_by_path(con).get("Доходы/Наличные"), "src": "wallet"})
+    incomes = _incomes(con)
     return jsonify({"balance": balance, "income": income, "months": months, "incomes": incomes,
                     "valid_until": session.get("valid_until"), "last": get_meta(con, "bank_last_date")})
+
+
+def _incomes(con) -> list[dict]:
+    """Поступления на счёт (доходы и входящие переводы; возвраты на карту — не здесь, они у своих покупок).
+    Доход наличными — это взносы на счёт (они здесь, в выписке); записи кошелька только меняют остаток на руках,
+    иначе одни и те же деньги посчитались бы дважды."""
+    return [{"id": r["id"], "date": r["date"], "amount": r["amount"], "type": r["type"] or "",
+             "who": r["counterparty"] or ("Взнос наличных" if (r["type"] or "").startswith("CASH-IN") else ""),
+             "desc": r["description"] or "", "cat": r["category_id"], "src": r["category_source"]}
+            for r in con.execute("SELECT * FROM bank_tx WHERE amount > 0 AND type NOT LIKE '%RETURN%' ORDER BY date DESC")]
+
+
+def _top_groups(con) -> dict:
+    """id категории -> id её группы верхнего уровня"""
+    parent = {r["id"]: r["parent_id"] for r in con.execute("SELECT id, parent_id FROM categories")}
+    out = {}
+    for cid in parent:
+        c, seen = cid, set()
+        while parent.get(c) is not None and c not in seen:
+            seen.add(c)
+            c = parent[c]
+        out[cid] = c
+    return out
 
 
 @app.get("/api/wallet")
@@ -235,6 +266,20 @@ def _apply_category(con, body: dict) -> int:
                     (cat, body["purchase_id"], body["line"]))
         con.commit()
         return 1
+    pid = body.get("purchase_id") or ""
+    if pid.startswith("bank:"):  # операция банка: «все такие» = все покупки в этом магазине / переводы этому человеку
+        m = con.execute("SELECT merchant FROM purchases WHERE id = ?", (pid,)).fetchone()
+        key = categories.add_shop_rule(con, m["merchant"], cat) if m else None
+        if key is None:  # магазина нет (BLIK без названия) — только эта операция
+            return _apply_category(con, body | {"mode": "item"})
+        changed = 0
+        for r in con.execute("SELECT i.purchase_id, i.line, p.merchant FROM items i JOIN purchases p ON p.id = i.purchase_id "
+                             "WHERE i.category_source = 'manual' AND p.source = 'bank'").fetchall():
+            if categories.shop_key(r["merchant"]) == key:  # ручные правки этого магазина заменяет правило
+                changed += con.execute("UPDATE items SET category_source = NULL WHERE purchase_id = ? AND line = ?",
+                                       (r["purchase_id"], r["line"])).rowcount
+        con.commit()
+        return changed
     name = body["name"]
     rows = con.execute("SELECT DISTINCT product_code FROM items WHERE lower(name) = lower(?)", (name,)).fetchall()
     codes = [r["product_code"] for r in rows if r["product_code"]]
@@ -280,8 +325,12 @@ def add_category():
 @app.post("/api/delete-rule")
 def delete_rule():
     con = connect()
+    rule = con.execute("SELECT target FROM rules WHERE id = ?", (request.get_json()["id"],)).fetchone()
     con.execute("DELETE FROM rules WHERE id = ?", (request.get_json()["id"],))
     con.commit()
+    if rule and rule["target"] == "merchant":  # категории операций банка и поступлений — заново по выписке
+        from core import reconcile
+        reconcile.match(verbose=False)
     categories.categorize(con)
     return jsonify(ok=True)
 
@@ -391,8 +440,24 @@ def purchase_hide():
     con.commit()
     if p["bank_tx_id"]:  # была привязана к операции банка — пересверяем, операция станет тратой «без чека»
         from core import reconcile
-        reconcile.reconcile(verbose=False)
+        reconcile.match(verbose=False)
     return jsonify(ok=True, reconciled=bool(p["bank_tx_id"]))
+
+
+@app.post("/api/purchase/confirm")
+def purchase_confirm():
+    """Платёж «под вопросом» на самом деле прошёл (другой картой): считать. undo=True — снова под вопрос."""
+    b = request.get_json()
+    con = connect()
+    if b.get("undo"):
+        con.execute("DELETE FROM confirmed_purchases WHERE id = ?", (b["id"],))
+        con.execute("UPDATE purchases SET status = 'doubt' WHERE id = ?", (b["id"],))
+    else:
+        con.execute("INSERT OR REPLACE INTO confirmed_purchases VALUES (?, ?)",
+                    (b["id"], dt.datetime.now().isoformat(timespec="seconds")))
+        con.execute("UPDATE purchases SET status = NULL WHERE id = ?", (b["id"],))
+    con.commit()
+    return jsonify(ok=True)
 
 
 @app.post("/api/purchase/restore")
@@ -475,6 +540,7 @@ def update_schedule_set():
 
 
 def serve(open_browser=True):
+    categories.seed(connect())  # схема базы и дерево категорий — до первого запроса
     url = f"http://{HOST}:{PORT}"
     print(f"Бюджет: {url}  (Ctrl+C — остановить)")
     if open_browser:

@@ -25,14 +25,6 @@ RAW = DATA / "mail" / "raw"
 SINCE = "01-Jan-2025"
 KEYRING_SERVICE = "budget-gmail-imap"
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS emails (
-    uid INTEGER PRIMARY KEY, msg_id TEXT, date TEXT, from_addr TEXT, from_name TEXT, domain TEXT,
-    subject TEXT, size INTEGER, labels TEXT, path TEXT
-);
-CREATE INDEX IF NOT EXISTS emails_domain ON emails(domain);
-CREATE TABLE IF NOT EXISTS mail_senders (domain TEXT PRIMARY KEY, status TEXT, note TEXT);
-"""
 # признаки писем о покупках/платежах в теме
 SHOP_WORDS = re.compile(
     r"zam[oó]wieni|zamowien|order|potwierdz|faktur|paragon|p[lł]atno[sś]|zakup|receipt|invoice|rachun|dostaw"
@@ -99,9 +91,7 @@ def all_mail_folder(con) -> str:
 
 
 def db():
-    con = connect()
-    con.executescript(SCHEMA)
-    return con
+    return connect()  # таблицы писем — в core/db.py
 
 
 def decode(value) -> str:

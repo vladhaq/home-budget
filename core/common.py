@@ -1,7 +1,9 @@
 """Общие функции для всех модулей бюджета."""
+import configparser
 import os
 import re
 import unicodedata
+from functools import lru_cache
 from pathlib import Path
 
 BUDGET = Path(__file__).resolve().parent.parent
@@ -12,6 +14,22 @@ def fold(s: str) -> str:
     """Нижний регистр без польских диакритик: 'Masło' -> 'maslo'."""
     s = (s or "").lower().replace("ł", "l")
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+
+@lru_cache(maxsize=1)
+def local_config() -> configparser.ConfigParser:
+    """config.ini без подстановок «%» и с «=» как единственным разделителем: в своих правилах бывают «:» и «%»."""
+    cfg = configparser.ConfigParser(delimiters=("=",), interpolation=None)
+    cfg.optionxform = str  # регистр важен: названия магазинов
+    cfg.read(BUDGET / "config.ini", encoding="utf-8")
+    return cfg
+
+
+def local_pairs(section: str) -> list[tuple[str, str]]:
+    """Свои правила из config.ini — «шаблон = значение»: работодатель, вуз, свои заведения. В коде их нет,
+    поэтому копия проекта для другого человека не содержит твоих данных."""
+    cfg = local_config()
+    return [(k.strip(), v.strip()) for k, v in cfg.items(section) if v.strip()] if cfg.has_section(section) else []
 
 
 def word_matches(word: str, token: str) -> bool:

@@ -16,6 +16,7 @@ lidl-deals/постоянные_позиции.txt
 # --- служебные файлы Python и редакторов ---
 __pycache__/
 *.pyc
+.pytest_cache/
 .venv/
 venv/
 .vscode/

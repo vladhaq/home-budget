@@ -38,13 +38,6 @@ LOCK = DATA / "update.lock"
 TASK = "BudgetUpdate"
 KEEP_RUNS = 60
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS update_runs (
-  id INTEGER PRIMARY KEY, started TEXT, finished TEXT, trigger TEXT, steps TEXT, status TEXT, summary TEXT);
-CREATE TABLE IF NOT EXISTS update_steps (
-  run_id INTEGER, step TEXT, started TEXT, finished TEXT, status TEXT, summary TEXT, hint TEXT, output TEXT,
-  PRIMARY KEY (run_id, step));
-"""
 TRIGGERS = {"manual": "вручную", "schedule": "автозапуск", "ui": "из интерфейса"}
 STATUS_MARK = {"ok": "✓", "warn": "!", "off": "!", "skip": "–", "error": "✗", "running": "…"}  # off — не настроено, а надо
 
@@ -62,9 +55,7 @@ def now() -> str:
 
 
 def db():
-    con = connect()
-    con.executescript(SCHEMA)
-    return con
+    return connect()  # таблицы журнала — в core/db.py
 
 
 def settings() -> dict:

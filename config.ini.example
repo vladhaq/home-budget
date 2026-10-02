@@ -27,3 +27,40 @@ keep = 10
 [update]
 ; как часто делать резервную копию при обновлении, в днях (0 — не делать)
 backup_every_days = 1
+
+; ---------------- свои правила (всё необязательно) ----------------
+; То, что относится только к тебе: работодатель, вуз, свои заведения. Шаблон — часть текста маленькими буквами
+; без польских знаков (ł -> l, ó -> o), варианты через |. Категория — ключ из core/categories.py (TREE):
+; food.nocheck, housing.rent, education, income.salary, leisure.cafe ...
+
+[bank]
+; свои небольшие города, склеенные с названием в выписке («OLAWASKLEP …»), через запятую
+; cities = olawa, sobotka
+
+[bank_rules]
+; операция выписки без чека: шаблон = категория
+; moja uczelnia = education
+
+[income_rules]
+; поступление: шаблон (отправитель, описание) = категория
+; nazwa pracodawcy = income.salary
+
+[merchants]
+; шаблон в описании операции = название магазина
+; pizzeria roma = Pizzeria Roma
+
+[shops]
+; магазин = категория, всегда (билеты, визиты, учёба — по названию позиции не понять)
+; Moja Uczelnia = education
+
+[shops_hint]
+; магазин = категория, если словарь товар не узнал
+; Sklep Przyklad = goods.electronics
+
+[mail_domains]
+; домен писем магазина = название
+; sklep-przyklad.pl = Sklep Przyklad
+
+[mail_payees]
+; получатель в письмах Przelewy24 / PayU / Tpay: шаблон = название
+; moja uczelnia = Moja Uczelnia

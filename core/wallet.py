@@ -2,14 +2,14 @@
 
 Ты вносишь записи:
   count   — пересчёт: «на руках сейчас X zł»
-  income  — доход наличными (деньги, пришедшие не через карту)
+  income  — пришли наличные (не с карты): пополняет кошелёк
   expense — расход наличными без чека
 Автоматически (начиная с первой записи):
   + снятие в банкомате (выписка), − взнос наличных на счёт (выписка), − покупки по чекам с оплатой наличными.
-При пересчёте разница «ожидалось − насчитано» — это траты наличными без чека (или неучтённый доход, если больше).
+При пересчёте разница «ожидалось − насчитано» — это траты наличными без чека (или неучтённый приход, если больше).
 
-Взносы наличных на счёт ДО первой записи считаются доходом (деньги, пришедшие наличными);
-после — переносом из кошелька на счёт (доход наличными ты вносишь сам), чтобы не считать деньги дважды.
+Доход наличными считается в момент взноса на счёт (категория «Доходы/Наличные» у операции в выписке).
+Записи кошелька в доходы не идут — только меняют остаток на руках, чтобы одни деньги не посчитались дважды.
 
 Время операций банка: банк даёт только дату. Операция появилась в выписке между двумя загрузками —
 значит, случилась в этом окне; если в окно попадает твоя запись (пересчёт), порядок неизвестен —
@@ -21,20 +21,11 @@ import datetime as dt
 from core import categories
 from core.db import connect, save_purchase
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS wallet_entries (
-    id INTEGER PRIMARY KEY, date TEXT NOT NULL, kind TEXT NOT NULL, amount REAL NOT NULL, note TEXT
-);
--- твоё уточнение: во сколько был взнос/снятие из выписки (банк даёт только дату)
-CREATE TABLE IF NOT EXISTS wallet_times (tx_id TEXT PRIMARY KEY, at TEXT NOT NULL);
-"""
 KINDS = {"count": "пересчёт", "income": "доход наличными", "expense": "расход без чека"}
 
 
 def db():
-    con = connect()
-    con.executescript(SCHEMA)
-    return con
+    return connect()  # таблицы wallet_entries / wallet_times — в core/db.py
 
 
 def start_date(con) -> str | None:
@@ -117,9 +108,8 @@ def timeline(con) -> dict:
 
 def rebuild(con):
     """Покупки «кошелёк»: расходы без чека и разница при пересчёте; плюс вид взносов наличных в выписке."""
-    con.executescript(SCHEMA)
     categories.seed(con)
-    ids = categories.ids_by_path(con)
+    K = categories.key_ids(con)
     con.execute("DELETE FROM items WHERE purchase_id LIKE 'wallet:%'")
     con.execute("DELETE FROM payments WHERE purchase_id LIKE 'wallet:%'")
     con.execute("DELETE FROM purchases WHERE source = 'wallet'")
@@ -128,7 +118,7 @@ def rebuild(con):
         if e["kind"] == "expense":
             name, amount, cat = e["note"] or "Расход наличными без чека", e["amount"], None
         elif e["kind"] == "count" and e.get("diff") and e["diff"] > 0.009:
-            name, amount, cat = "Траты наличными без чека (по пересчёту)", e["diff"], ids.get("Прочее/Наличные без чека")
+            name, amount, cat = "Траты наличными без чека (по пересчёту)", e["diff"], K.get("other.cash")
         else:
             continue
         pid = f"wallet:{e.get('id') or e['date']}"
@@ -139,35 +129,20 @@ def rebuild(con):
         if cat:
             con.execute("UPDATE items SET category_id = ?, category_source = 'wallet' WHERE purchase_id = ? "
                         "AND category_source IS NULL", (cat, pid))
-    # взносы наличных: до начала учёта кошелька — доход, после — перенос из кошелька на счёт
+    # взнос наличных на счёт — доход (так видно «получил / потратил»); в кошельке он уменьшает наличные на руках
     have = {r["name"] for r in con.execute("PRAGMA table_info(bank_tx)")}
     if "category_id" in have:
-        income, transfer = ids.get("Доходы/Наличные"), ids.get("Переводы/Взнос наличных")
-        in_wallet = {e["tx"] for e in tl["events"] if e.get("tx")}
-        for r in con.execute("SELECT id FROM bank_tx WHERE type LIKE 'CASH-IN%' AND coalesce(category_source, '') != 'manual'").fetchall():
-            con.execute("UPDATE bank_tx SET category_id = ?, category_source = 'wallet' WHERE id = ?",
-                        (transfer if r["id"] in in_wallet else income, r["id"]))
+        con.execute("UPDATE bank_tx SET category_id = ?, category_source = 'wallet' "
+                    "WHERE type LIKE 'CASH-IN%' AND coalesce(category_source, '') != 'manual'", (K.get("income.cash"),))
     con.commit()
     return tl
 
 
 def set_time(con, tx_id: str, at: str | None):
     """Твоё уточнение времени операции банка (at = 'YYYY-MM-DDTHH:MM'); None — снова по выписке."""
-    con.executescript(SCHEMA)
     if at:
         dt.datetime.fromisoformat(at)
         con.execute("INSERT OR REPLACE INTO wallet_times VALUES (?, ?)", (tx_id, at[:16] + ":00"))
     else:
         con.execute("DELETE FROM wallet_times WHERE tx_id = ?", (tx_id,))
     con.commit()
-
-
-def income_by_month(con) -> dict:
-    """Доход наличными по месяцам: твои записи «доход» + неучтённый плюс при пересчёте."""
-    out = {}
-    for e in timeline(con)["events"]:
-        v = e["amount"] if e["kind"] == "income" else (-e["diff"] if e["kind"] == "count" and e.get("diff") and e["diff"] < 0 else 0)
-        if v:
-            m = e["date"][:7]
-            out[m] = round(out.get(m, 0) + v, 2)
-    return out
