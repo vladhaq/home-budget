@@ -316,6 +316,8 @@ async function renderCash() {
   }
   main.innerHTML = `
     <div class="cards">
+      ${W.bank && W.bank.balance != null ? `<div class="card">всего: наличные + карта<b>${zl((W.balance || 0) + W.bank.balance)}</b>
+        наличные ${zl(W.balance || 0)} + на счёте PKO ${zl(W.bank.balance)} <span class="muted">(${ddmmyy(W.bank.date)})</span></div>` : ""}
       <div class="card">на руках сейчас (расчёт)<b class="${W.balance < 0 ? "up" : ""}">${zl(W.balance)}</b>
         ${W.balance < 0 ? "меньше нуля — похоже, не записаны пришедшие наличные или пересчёт" : "проверь пересчётом"}</div>
       <div class="card">последний пересчёт<b>${lastCount ? zl(lastCount.amount) : "—"}</b>${lastCount ? lastCount.date.slice(0, 16).replace("T", " ") : ""}</div>

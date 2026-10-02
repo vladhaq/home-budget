@@ -733,9 +733,9 @@ def remind_time(d: dict, clock: dt.time) -> dt.datetime | None:
 
 def reminder_text(d: dict, at) -> str:
     if at is None and d["start"] <= today().isoformat():
-        head = f"🛒 Lidl: уже на скидке — {status(d)}"
+        head = f"🛒 {d.get('store', 'Lidl')}: уже на скидке — {status(d)}"
     else:
-        head = f"🛒 Lidl: завтра ({fmt_date(d['start'])}) на скидке — стоит зайти в магазин"
+        head = f"🛒 {d.get('store', 'Lidl')}: завтра ({fmt_date(d['start'])}) на скидке — стоит зайти в магазин"
     return head + "\n\n" + describe(d, html=True)
 
 

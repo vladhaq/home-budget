@@ -1,7 +1,7 @@
 """Почта (Gmail по IMAP): заголовки -> статистика отправителей -> полные письма только от отмеченных.
 
   python budget.py mail login                 сохранить пароль приложения Google (в диспетчер учётных данных Windows)
-  python budget.py mail headers               скачать заголовки всех писем с 01.01.2025 (дозагрузка новых)
+  python budget.py mail headers               скачать заголовки писем с начала банковской выписки (дозагрузка новых)
   python budget.py mail senders [N]           отправители: сколько писем, примеры тем, похоже ли на покупки
   python budget.py mail mark shop|sub|ignore <домен> [...]   отметить отправителей
   python budget.py mail bodies                скачать полные письма от отмеченных магазинов/подписок
@@ -9,6 +9,7 @@
 Почта открывается только на чтение (EXAMINE), письма не помечаются прочитанными (BODY.PEEK).
 """
 import configparser
+import datetime as dt
 import email
 import email.header
 import email.utils
@@ -22,7 +23,6 @@ from core.db import connect, get_meta, set_meta
 
 CONFIG = BUDGET / "config.ini"
 RAW = DATA / "mail" / "raw"
-SINCE = "01-Jan-2025"
 KEYRING_SERVICE = "budget-gmail-imap"
 
 # признаки писем о покупках/платежах в теме
@@ -120,6 +120,14 @@ def base_domain(addr: str) -> str:
 
 # ---------------------------------------------------------------- шаг 1: заголовки
 
+def since() -> str:
+    """С какой даты нужны письма: с начала выписки и ещё две недели до неё (заказ бывает раньше списания);
+    без выписки — с 01.01.2025. Месяц по-английски — так требует IMAP, независимо от языка системы."""
+    first = connect().execute("SELECT min(date) FROM bank_tx").fetchone()[0]
+    d = dt.date.fromisoformat(first) - dt.timedelta(days=14) if first else dt.date(2025, 1, 1)
+    return f"{d.day:02d}-{'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split()[d.month - 1]}-{d.year}"
+
+
 def headers():
     con, store = imap(), db()
     folder = all_mail_folder(con)
@@ -132,11 +140,12 @@ def headers():
         store.execute("DELETE FROM emails")
     set_meta(store, "mail_uidvalidity", validity)
     store.commit()  # без этого запись висит незакрытой и блокирует базу, когда новых писем нет
-    _, data = con.uid("search", None, "SINCE", SINCE)
+    start = since()
+    _, data = con.uid("search", None, "SINCE", start)
     uids = [int(u) for u in data[0].split()]
     have = {r[0] for r in store.execute("SELECT uid FROM emails")}
     todo = [u for u in uids if u not in have]
-    print(f"Писем с {SINCE}: {len(uids)}, новых заголовков: {len(todo)}")
+    print(f"Писем с {start}: {len(uids)}, новых заголовков: {len(todo)}")
     for n in range(0, len(todo), 200):
         chunk = ",".join(map(str, todo[n:n + 200]))
         _, resp = con.uid("fetch", chunk,

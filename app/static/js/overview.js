@@ -44,6 +44,36 @@ function granBar(range) {  // переключатель день/неделя/.
     ${range ? `<span class="crumbs">${S.crumbs.length ? `<button class="chip" data-back="1">‹ назад</button> ${path} ›` : ""}
       <b>${esc(range.label)}</b></span>` : ""}</div>`;
 }
+// скрытые глазом категории (с подкатегориями): уходят из графика, карточек, «товаров» и «чеков»; в дереве — зачёркнуты
+const HIDDEN_KEY = "budget-hidden-cats";
+S.hidden = new Set((() => { try { return JSON.parse(localStorage.getItem(HIDDEN_KEY) || "[]"); } catch (e) { return []; } })());
+function hiddenCat(cat) {
+  if (!S.hidden.size) return false;
+  let k = cat == null || !CAT[cat] ? "none" : String(cat);
+  for (;;) {
+    if (S.hidden.has(k)) return true;
+    if (k === "none" || !CAT[k] || CAT[k].parent_id == null) return false;
+    k = String(CAT[k].parent_id);
+  }
+}
+function visible(r) {  // строка обзора без скрытых категорий; null — если в ней ничего не осталось
+  if (!S.hidden.size) return r;
+  const items = r.items.filter(it => !hiddenCat(it.cat));
+  if (!items.length) return null;
+  if (items.length === r.items.length) return r;
+  return {...r, items, value: items.reduce((s, it) => s + net(it), 0), saved: items.reduce((s, it) => s + (it.discount || 0), 0)};
+}
+function toggleHidden(k) {
+  S.hidden.has(k) ? S.hidden.delete(k) : S.hidden.add(k);
+  try { localStorage.setItem(HIDDEN_KEY, JSON.stringify([...S.hidden])); } catch (e) { /* только до перезагрузки */ }
+}
+function hiddenBar() {
+  // скрытые, которые сейчас вообще есть в дереве (старые id после удаления категорий не показываем)
+  const names = [...S.hidden].filter(k => k === "none" || CAT[k]).map(k => k === "none" ? "Неопознанные" : CAT[k].name);
+  return names.length ? `<div class="hidbar">${ICON.eyeOff} скрыто из графика и сводки: <b>${names.map(esc).join(", ")}</b>
+    <button class="chip" data-eyeall="1">показать всё</button></div>` : "";
+}
+
 function renderOverview() {
   const g = S.gran, main = document.getElementById("main"), flow = curFlow();
   let outs = flow === "in" ? [] : filtered(), ins = flow === "out" ? [] : filteredIncome(), range = S.range;
@@ -67,10 +97,12 @@ function renderOverview() {
   if (S.period !== "all" && !labels.includes(S.period)) S.period = g === "day" || g === "week" || range ? "all" : labels[labels.length - 1];
   main.innerHTML = `${granBar(range)}<p class="muted">Клик по столбцу — статистика периода, повторный — снять выбор.
       Двойной клик — ${g === "day" ? "чеки этого дня" : "разбить на " + DRILL_WORD[g]}.</p>
-    <div class="chartbox"><canvas id="chart" height="110"></canvas></div><section id="panel"></section>`;
-  const spent = labels.map(k => +byKey[k].reduce((s, p) => s + p.value, 0).toFixed(2));
-  const saved = labels.map(k => +byKey[k].reduce((s, p) => s + p.saved, 0).toFixed(2));
-  const recv = labels.map(k => +byIn[k].reduce((s, p) => s + p.value, 0).toFixed(2));
+    ${hiddenBar()}<div class="chartbox"><canvas id="chart" height="110"></canvas></div><section id="panel"></section>`;
+  // суммы на графике — без скрытых глазом категорий
+  const vsum = (rows, f) => +rows.reduce((s, p) => { const v = visible(p); return s + (v ? v[f] : 0); }, 0).toFixed(2);
+  const spent = labels.map(k => vsum(byKey[k], "value"));
+  const saved = labels.map(k => vsum(byKey[k], "saved"));
+  const recv = labels.map(k => vsum(byIn[k], "value"));
   const colors = c => labels.map(k => k === S.period || S.period === "all" ? css(c) : alpha(css(c), .4));
   // расходы — синие (и скидки — зелёные), поступления — зелёные; вместе — расходы и поступления без скидок
   const sets = flow === "out" ? [["потрачено, zł", spent, "--c-blue"], ["сэкономлено на скидках, zł", saved, "--c-green"]]
@@ -122,7 +154,8 @@ function backTo(i) {  // вернуться к уровню из «хлебны�
 function renderPanel({labels, byKey, byIn, spent, saved, recv, flow}) {
   const g = S.gran, all = S.period === "all", i = labels.indexOf(S.period);
   const pick = by => (all ? labels.flatMap(k => by[k]) : by[S.period]).slice().sort((a, b) => a.date < b.date ? -1 : 1);
-  const rs = pick(byKey), ins = pick(byIn);
+  const rsAll = pick(byKey), insAll = pick(byIn);  // все — для дерева категорий (там скрытые зачёркнуты)
+  const rs = rsAll.map(visible).filter(Boolean), ins = insAll.map(visible).filter(Boolean);
   const sum = arr => all ? arr.reduce((a, b) => a + b, 0) : arr[i];
   const total = sum(spent), disc = sum(saved), got = sum(recv);
   const change = arr => !all && i > 0 && arr[i - 1] ? (arr[i] / arr[i - 1] - 1) * 100 : null;
@@ -153,8 +186,8 @@ function renderPanel({labels, byKey, byIn, spent, saved, recv, flow}) {
     </div>
     <div class="tabs" data-key="view">${[["cats", "категории"], ["items", flow === "in" ? "поступления" : "товары"], ["receipts", flow === "in" ? "по отправителям" : "чеки"]].map(([k, n]) =>
       `<button class="${S.view === k ? "on" : ""}" data-view="${k}">${n}</button>`).join("")}</div>
-    <div id="body">${!rs.length && !ins.length ? `<p class="muted">В этот период ничего нет.</p>`
-      : S.view === "cats" ? catsTable(rs, ins)
+    <div id="body">${!rsAll.length && !insAll.length ? `<p class="muted">В этот период ничего нет.</p>`
+      : S.view === "cats" ? catsTable(rsAll, insAll)
       : (rs.length ? (S.view === "items" ? itemsTable(items) : receiptsList(rs)) : "")
         + (ins.length ? `${rs.length ? `<h3 style="margin:18px 0 6px">Поступления</h3>` : ""}${S.view === "items" ? incomeTable(ins) : incomeBySender(ins)}` : "")}</div>`;
   placeIndicators();
@@ -326,14 +359,14 @@ function catsTable(rs, ins = []) {  // расходы и поступления 
       <button class="chip" data-catall="0">свернуть всё</button></div>` + parts.join("");
 }
 function catTree(rs, title, word) {  // категория -> подкатегории -> товары (или поступления); каждая ветка разворачивается
-  const T = {}, roots = new Set(); let all = 0;
-  const node = k => (T[k] ??= {spent: 0, items: [], kids: new Set()});
+  const T = {}, roots = new Set(); let all = 0;  // all — только видимое (скрытое глазом в долю не входит)
+  const node = k => (T[k] ??= {spent: 0, full: 0, items: [], kids: new Set()});
   for (const r of rs) for (const it of r.items) {
-    const v = net(it); all += v;
+    const v = net(it), hid = hiddenCat(it.cat); if (!hid) all += v;
     let k = it.cat == null || !CAT[it.cat] ? "none" : String(it.cat);
     node(k).items.push({r, it});
     for (;;) {
-      node(k).spent += v;
+      node(k).full += v; if (!hid) node(k).spent += v;
       const par = k === "none" ? null : CAT[k].parent_id;
       if (par == null) { roots.add(k); break; }
       node(String(par)).kids.add(k); k = String(par);
@@ -342,15 +375,19 @@ function catTree(rs, title, word) {  // категория -> подкатего
   CATS_BRANCHES.push(...Object.keys(T).filter(k => T[k].kids.size));
   const name = k => k === "none" ? "⚠ Неопознанные" : CAT[k] ? CAT[k].name : "?";
   const bar = v => `<div class="bar" style="width:${(v / (all || 1) * 100).toFixed(1)}%"></div>`;
-  const bySpent = (a, b) => T[b].spent - T[a].spent;
+  const bySpent = (a, b) => T[b].full - T[a].full;
   const rows = (k, depth, fresh) => {
     const n = T[k], open = S.openCats.has(k), kids = [...n.kids].sort(bySpent);
+    const self = S.hidden.has(k), hid = self || hiddenCat(k === "none" ? null : +k);  // сама скрыта или скрыт родитель
     const label = depth ? esc(name(k)) : `<b>${esc(name(k))}</b>`;
-    let h = `<tr class="crow${open ? " opened" : ""}${fresh ? " fresh" : ""}"><td style="padding-left:${12 + depth * 26}px">
-        <button class="cellbtn ctog" data-cattog="${k}" title="${open ? "свернуть" : "развернуть"}"><span class="chev${open ? " on" : ""}"></span>${label}</button>
+    const v = hid ? n.full : n.spent;  // скрытая — полная сумма (зачёркнута); видимая — без скрытых подкатегорий
+    let h = `<tr class="crow${open ? " opened" : ""}${fresh ? " fresh" : ""}${hid ? " hid" : ""}"><td style="padding-left:${12 + depth * 26}px">
+        <button class="eye${self ? " off" : ""}" data-eye="${k}" type="button" title="${self ? "вернуть в график и сводку"
+          : hid ? "скрыта вместе с родительской категорией" : "убрать из графика и сводки"}"${hid && !self ? " disabled" : ""}>${self ? ICON.eyeOff : ICON.eye}</button><button
+          class="cellbtn ctog" data-cattog="${k}" title="${open ? "свернуть" : "развернуть"}"><span class="chev${open ? " on" : ""}"></span>${label}</button>
         ${kids.length ? "" : `<span class="src">${n.items.length} поз.</span>`}</td>
-      <td class="n">${depth ? zl(n.spent) : `<b>${zl(n.spent)}</b>`}</td><td class="n">${(n.spent / (all || 1) * 100).toFixed(0)}%</td>
-      <td>${bar(n.spent)}</td></tr>`;
+      <td class="n">${depth ? zl(v) : `<b>${zl(v)}</b>`}</td><td class="n">${hid ? "—" : (v / (all || 1) * 100).toFixed(0) + "%"}</td>
+      <td>${hid ? "" : bar(v)}</td></tr>`;
     if (!open) return h;
     const fr = S.justOpenedCat === k;
     h += kids.map(c => rows(c, depth + 1, fr)).join("");

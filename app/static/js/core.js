@@ -17,6 +17,9 @@ const S = {page: "overview", month: null, view: "cats", sort: {key: "spent", dir
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)");
 const SVG = d => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${d}</svg>`;
 const ICON = {
+  analytics: SVG('<path d="M4 19h16"/><path d="M5 15l4-5 4 3 6-7"/><path d="M15 6h4v4"/>'),
+  eye: SVG('<path d="M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12s-3.5 6.5-9.5 6.5S2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>'),
+  eyeOff: SVG('<path d="M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12s-3.5 6.5-9.5 6.5S2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/><path d="M4 20 20 4"/>'),
   overview: SVG('<path d="M4 20h16"/><path d="M7 16v-5"/><path d="M12 16V6"/><path d="M17 16v-8"/>'),
   bank: SVG('<rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M3 10h18"/><path d="M7 15h4"/>'),
   cash: SVG('<path d="M4 7.5V7a2 2 0 0 1 2-2h11"/><rect x="3" y="7.5" width="18" height="12" rx="2.5"/><path d="M16.5 13.5h.01"/>'),
@@ -34,7 +37,8 @@ const ICON = {
 };
 // разделы — как чаты: цвета аватаров Telegram
 const PAGES = [
-  {k: "overview", t: "Обзор", c: ["#72d5fd", "#2a9ef1"]}, {k: "bank", t: "Банк", c: ["#a0de7e", "#54cb68"]},
+  {k: "overview", t: "Обзор", c: ["#72d5fd", "#2a9ef1"]}, {k: "analytics", t: "Аналитика", c: ["#ffb199", "#ff6f91"]},
+  {k: "bank", t: "Банк", c: ["#a0de7e", "#54cb68"]},
   {k: "cash", t: "Наличные", c: ["#ffcd6a", "#ffa85c"]}, {k: "deals", t: "Скидки", c: ["#e0a2f3", "#d669ed"]}, {k: "unknown", t: "Неопознанные", short: "Неопозн.", c: ["#ff885e", "#ff516a"]},
   {k: "categories", t: "Категории", c: ["#82b1ff", "#665fff"]}, {k: "settings", t: "Настройки", c: ["#53edd6", "#28c9b7"]}];
 const AVA = [["#ff885e", "#ff516a"], ["#ffcd6a", "#ffa85c"], ["#82b1ff", "#665fff"], ["#a0de7e", "#54cb68"],
@@ -143,7 +147,7 @@ document.addEventListener("pointerdown", e => {  // «волна» от точк
 let REFUNDS = {};  // id покупки -> её возвраты на карту
 async function load() {
   D = await (await fetch("/api/data")).json();
-  WALLET = null;
+  WALLET = null; ANALYTICS = null;
   CAT = {}; KIDS = {}; REFUNDS = {};
   for (const c of D.categories) { CAT[c.id] = c; (KIDS[c.parent_id ?? 0] ??= []).push(c); }
   for (const p of D.purchases) if (p.refund_of) (REFUNDS[p.refund_of] ??= []).push(p);

@@ -141,6 +141,8 @@ def refund_origin(con, t) -> dict | None:
     amount = round(t["amount"], 2)
     cands = []
     for r in con.execute("""SELECT p.id, p.merchant, p.date, p.total, p.bank_tx_id, i.name,
+                                   (SELECT count(DISTINCT name) FROM items WHERE purchase_id = p.id
+                                    AND name NOT IN ('Dostawa', 'Koszt płatności')) n,
                                    round(i.amount - coalesce(i.discount, 0), 2) v
                             FROM purchases p JOIN items i ON i.purchase_id = p.id
                             WHERE p.total > 0 AND date(p.date) BETWEEN date(?, '-90 day') AND date(?)
@@ -151,8 +153,9 @@ def refund_origin(con, t) -> dict | None:
             cands.append(((same, whole, r["bank_tx_id"] is not None, r["date"]), r))
     if not cands:
         return None
-    _, r = max(cands, key=lambda c: c[0])
-    return {"id": r["id"], "item": r["name"]}
+    (_, whole, *_), r = max(cands, key=lambda c: c[0])
+    more = f" и ещё {r['n'] - 1}" if whole and r["n"] > 1 else ""  # вернул весь заказ из нескольких товаров
+    return {"id": r["id"], "item": r["name"] + more}
 
 
 def migrate_rules_v2(con):
@@ -227,7 +230,7 @@ def match(verbose=True):
         t["merchant"] = merchant_of(t["description"] or "")
     debits = [t for t in txs if t["amount"] < 0]
     purchases = [dict(r) for r in con.execute(
-        "SELECT id, date, merchant, total, payment_method, note, card_last4 FROM purchases "
+        "SELECT id, date, merchant, total, payment_method, note, card_last4, pay_ref FROM purchases "
         "WHERE total IS NOT NULL AND total > 0")]
 
     def scale(pid, total):
@@ -242,7 +245,7 @@ def match(verbose=True):
                     "discount = round(discount * ?, 2) WHERE purchase_id = ?", (k, k, k, pid))
         con.execute("UPDATE purchases SET orig_total = coalesce(orig_total, total), total = ? WHERE id = ?", (total, pid))
 
-    # 1. пары «покупка ↔ операция»: сначала с совпадением продавца, затем по ближайшей дате
+    # 1. пары «покупка ↔ операция»: сначала по номеру BLIK, затем с совпадением продавца, затем по ближайшей дате
     pairs = []
     for p in purchases:
         if p["payment_method"] == "cash":
@@ -259,7 +262,11 @@ def match(verbose=True):
             same_shop = t["merchant"] is not None and t["merchant"] == p["merchant"]
             if t["merchant"] and p["merchant"] and t["merchant"] != p["merchant"] and t["type"] == "CARD-PAYMENT":
                 continue  # оплата картой в другом магазине — точно не эта покупка
-            pairs.append(((same_shop, -abs(delta), -diff), p, t))
+            ref, desc = (p["pay_ref"] or "").lstrip("0"), (t["description"] or "").strip().lstrip("0")
+            exact = bool(ref) and desc == ref
+            if ref and re.fullmatch(r"\d{8,}", desc) and not exact:
+                continue  # у операции BLIK свой номер, и он не этой покупки
+            pairs.append(((exact, same_shop, -abs(delta), -diff), p, t))
     pairs.sort(key=lambda x: x[0], reverse=True)
     used_p, used_t, matched = set(), set(), 0
     for _, p, t in pairs:

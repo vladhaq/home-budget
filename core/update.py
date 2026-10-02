@@ -235,7 +235,9 @@ def step_reconcile(con):
 def step_deals(con):
     from core import deals
     r = deals.auto()
-    summary = f"газеток: {r['flyers']}, акций на постоянные позиции: {r['deals']}"
+    summary = f"газеток Lidl и Kaufland: {r['flyers']}, акций на постоянные позиции: {r['deals']}"
+    if r.get("errors"):
+        summary += f"; не скачалось: {'; '.join(r['errors'])}"
     if r["reminded"]:
         summary += f", напоминаний поставлено: {r['reminded']}"
     if r["upcoming"] and not r["telegram"]["ready"]:
@@ -274,7 +276,7 @@ STEPS = [
     ("photos", "Папка receipts/inbox", step_photos),
     ("bank", "Выписка PKO", step_bank),
     ("reconcile", "Сверка и категории", step_reconcile),
-    ("deals", "Газетки Lidl и напоминания", step_deals),
+    ("deals", "Газетки Lidl и Kaufland, напоминания", step_deals),
     ("backup", "Резервная копия", step_backup),
 ]
 TITLES = {k: t for k, t, _ in STEPS}
@@ -506,13 +508,15 @@ def sources(con) -> list[dict]:
 
 
 def deals_source():
-    """Строка «Газетки Lidl» на странице «Настройки»: (готово, команда настройки, данные по, пояснение)."""
+    """Строка «Газетки» на странице «Настройки»: (готово, команда настройки, данные по, пояснение)."""
     try:
         from core import deals
         s, tg = deals.summary(), deals.telegram_state()
     except Exception as e:  # noqa: BLE001
         return False, None, None, f"модуль скидок не загрузился: {e}"
-    note = f"газеток: {s['flyers']}" + ("" if tg["ready"] else "; напоминания — после входа в Telegram")
+    st = s.get("stores", {})
+    note = (f"газеток Lidl: {st.get('lidl', {}).get('flyers', 0)}, Kaufland: {st.get('kaufland', {}).get('flyers', 0)}"
+            + ("" if tg["ready"] else "; напоминания — после входа в Telegram"))
     return True, None if tg["ready"] else "python budget.py telegram", (s["updated"] or "")[:16] or None, note
 
 

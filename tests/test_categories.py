@@ -17,6 +17,10 @@ GOLDEN = [
     ("Szkło ochronne z ramką Bizon do Redmi Note 15 Pro 5G, szybka na ekran 2 szt", "goods.electronics"),
     ("Opaska Xiaomi Smart Band 10 Inteligentna Bransoletka Czarna Midnight Black", "goods.electronics"),
     ("MAGNETYCZNY KABEL ONEPLUS 10A USB TYP C - USB TYP C 100W CZERWONY SZYBKI", "goods.electronics"),
+    ("Motorola g42 6GB/128GB", "goods.electronics"),
+    ("OnePlus 11 8gb 128gb black", "goods.electronics"),
+    ("Jack & Jones Szorty jeansowe - blue denim", "goods.clothes"),
+    ("Blend Denim shorts - denim white", "goods.clothes"),
     ("Odkurzacz piorący THOMAS Vestfalia XT", "goods.appliances"),
     ("Oczyszczacz powietrza XIAOMI Air Purifier 6", "goods.appliances"),
     # дом

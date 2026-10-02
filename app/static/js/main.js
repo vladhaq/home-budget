@@ -13,7 +13,8 @@ function renderNav(unknownCount, setWarn) {
            : `выписка по ${when(D.meta.bank_last_date)}`,
            bd: D.meta.bank_days_left != null && D.meta.bank_days_left <= 21 ? `<span class="badge red">!</span>` : ""},
     cash: {s: WALLET && WALLET.start ? `на руках ${zl(WALLET.balance)}` : "наличные на руках"},
-    deals: {s: !D.meta.deals ? "газетки Lidl" : D.meta.deals.deals ? `${D.meta.deals.deals} акций на твои позиции`
+    analytics: {s: ANALYTICS ? `прогноз месяца: ${zl(ANALYTICS.month.forecast)}` : "прогноз, календарь, регулярное"},
+    deals: {s: !D.meta.deals ? "газетки Lidl и Kaufland" : D.meta.deals.deals ? `${D.meta.deals.deals} акций на твои позиции`
               : `газеток: ${D.meta.deals.flyers}, на позиции акций нет`, tm: D.meta.deals ? when(D.meta.deals.updated || "") : "",
             bd: D.meta.deals && D.meta.deals.deals ? `<span class="badge">${D.meta.deals.deals}</span>` : ""},
     unknown: {s: [unknownCount ? `${unknownCount} без категории` : "", nDoubt ? `${nDoubt} под вопросом` : ""].filter(Boolean).join(" · ")
@@ -53,11 +54,11 @@ function render() {
     <button class="linkbtn" data-page="settings">${updRunning() ? `<span class="spin"></span>идёт обновление`
       : ul ? `обновлено ${dtf(ul.finished)} ${ul.status === "error" ? `<span class="up">✗ ошибка</span>` : ul.status === "warn" ? `<span class="warn">!</span>` : "✓"}`
       : `<span class="warn">ещё не обновлялось</span>`}</button>`;
-  if (S.page === "settings" || S.page === "deals") document.getElementById("filters").innerHTML = "";  // фильтры там ни к чему
+  if (["settings", "deals", "analytics"].includes(S.page)) document.getElementById("filters").innerHTML = "";  // фильтры там ни к чему
   else renderFilters();
   CHART_ANIM = S.anim;
   const done = ({overview: renderOverview, bank: renderBank, cash: renderCash, unknown: renderUnknown, categories: renderCategories,
-    settings: renderSettings, deals: renderDeals})[S.page]();
+    settings: renderSettings, deals: renderDeals, analytics: renderAnalytics})[S.page]();
   if (S.anim) { S.anim = false; Promise.resolve(done).then(() => animateEnter(document.getElementById("main"))); }
   updateSavebar();
 }
@@ -114,22 +115,23 @@ document.addEventListener("click", async e => {
     S.openCatPage = t.dataset.cptall === "1" ? new Set(Object.values(CAT).filter(c => (KIDS[c.id] || []).length).map(c => c.id)) : new Set();
     renderCategories(); return;
   }
+  if (t.dataset.dstore) { switchStore(t.dataset.dstore); return; }
   if (t.dataset.dupdate) {
-    const j = await dealsAction(() => post("/api/deals/update", {}), "Скачиваю свежие газетки Lidl…");
+    const j = await dealsAction(() => post("/api/deals/update", {store: S.dealStore}), `Скачиваю свежие газетки ${STORE_NAME[S.dealStore]}…`);
     if (j) { await refreshDeals(); toast(`Газетки обновлены: ${j.flyers}`); }
     return;
   }
   if (t.dataset.wadd || t.dataset.waddQ) {
     const inp = document.getElementById("wq"), q = (t.dataset.waddQ || (inp && inp.value) || "").trim();
     if (!q) { inp && inp.focus(); return; }
-    if (await dealsAction(() => post("/api/deals/watch", {action: "add", q}))) { await refreshDeals(); drawDealSearch(); toast(`«${q}» — в постоянных позициях`); }
+    if (await dealsAction(() => post("/api/deals/watch", {action: "add", q, store: S.dealStore}))) { await refreshDeals(); drawDealSearch(); toast(`«${q}» — в постоянных позициях ${STORE_NAME[S.dealStore]}`); }
     return;
   }
   if (t.dataset.wrm) {
     const q = t.dataset.wrm;
-    if (await dealsAction(() => post("/api/deals/watch", {action: "remove", q}))) {
+    if (await dealsAction(() => post("/api/deals/watch", {action: "remove", q, store: S.dealStore}))) {
       await refreshDeals();
-      toast(`«${q}» убран из постоянных`, {action: "Вернуть", onAction: async () => { await post("/api/deals/watch", {action: "add", q}); await refreshDeals(); }});
+      toast(`«${q}» убран из постоянных`, {action: "Вернуть", onAction: async () => { await post("/api/deals/watch", {action: "add", q, store: S.dealStore}); await refreshDeals(); }});
     }
     return;
   }
@@ -154,11 +156,11 @@ document.addEventListener("click", async e => {
   }
   if (t.dataset.dhist) { await dealHistory(); return; }
   if (t.dataset.remind) {
-    const j = await dealsAction(() => post("/api/deals/remind", {q: t.dataset.q, keys: [t.dataset.remind]}), "Ставлю напоминание в Telegram…");
+    const j = await dealsAction(() => post("/api/deals/remind", {q: t.dataset.q, keys: [t.dataset.remind], store: S.dealStore}), "Ставлю напоминание в Telegram…");
     if (j) {
       const r = j.made[0];
       toast(!r ? "Акция не найдена — обнови газетки" : r.skipped ? "Напоминание уже стояло" : `Напоминание в Избранном: ${r.when}`);
-      DEALS = null; DSEARCH = DSEARCH && {...DSEARCH, deals: (await (await fetch("/api/deals/search?q=" + encodeURIComponent(DSEARCH.q))).json()).deals};
+      DEALS = null; DSEARCH = DSEARCH && {...DSEARCH, deals: (await (await fetch(`/api/deals/search?${sq()}&q=` + encodeURIComponent(DSEARCH.q))).json()).deals};
       const y = scrollY; await renderDeals(); scrollTo(0, y);
     }
     return;
@@ -193,6 +195,12 @@ document.addEventListener("click", async e => {
   if (t.dataset.monthOpen) {
     S.page = "overview"; S.gran = "month"; S.range = null; S.crumbs = []; S.period = t.dataset.monthOpen; render(); scrollTo(0, 0); return;
   }
+  if (t.dataset.eye || t.dataset.eyeall) {  // глаз у категории: убрать из графика и сводки / вернуть
+    if (t.dataset.eyeall) { S.hidden.clear(); try { localStorage.removeItem(HIDDEN_KEY); } catch (e) { /* нет хранилища */ } }
+    else toggleHidden(t.dataset.eye);
+    const y = scrollY; CHART_ANIM = true; renderOverview(); scrollTo(0, y); return;
+  }
+  if ("rmark" in t.dataset) { await markRecurring(t.dataset.rkey, t.dataset.rmark); return; }
   if (t.dataset.flow) { S.flow = t.dataset.flow; S.period = "all"; CHART_ANIM = true; renderOverview(); return; }
   if (t.dataset.bopen) {
     const k = t.dataset.bopen; S.bankOpen.has(k) ? S.bankOpen.delete(k) : S.bankOpen.add(k);
@@ -279,13 +287,13 @@ async function applyChoice(choice) {
 async function dealSearch() {
   const q = (document.getElementById("dq") || {}).value?.trim();
   if (!q) return;
-  DSEARCH = await (await fetch("/api/deals/search?q=" + encodeURIComponent(q))).json();
+  DSEARCH = {...await (await fetch(`/api/deals/search?${sq()}&q=` + encodeURIComponent(q))).json(), store: S.dealStore};
   drawDealSearch(); animateEnter(document.getElementById("dres"));
 }
 async function dealHistory() {
   const q = (document.getElementById("hq") || {}).value?.trim();
   if (!q) return;
-  DHIST = await (await fetch("/api/deals/history?q=" + encodeURIComponent(q))).json();
+  DHIST = {...await (await fetch(`/api/deals/history?${sq()}&q=` + encodeURIComponent(q))).json(), store: S.dealStore};
   CHART_ANIM = true; drawHistory(); CHART_ANIM = false; animateEnter(document.getElementById("dhist"));
 }
 document.addEventListener("keydown", e => {  // Enter в полях страницы «Скидки»

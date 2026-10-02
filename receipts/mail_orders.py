@@ -162,11 +162,13 @@ def parse_stripe(lines) -> dict | None:
 
 # ---------------------------------------------------------------- общий разбор магазинов
 
-ORDER_RX = re.compile(r"(?:zam[oó]wieni[aeu]|order|nr|numer|numerze)\s*(?:nr\.?|no\.?|#|:)?\s*:?\s*([A-Z]{0,5}[-#]?\d[\w\-/]{3,})", re.I)
-TOTAL_LABELS = r"^(łącznie|do zapłaty|razem|suma zamówienia|wartość zamówienia|kwota zamówienia|total|amount paid|kwota)\b"
+ORDER_RX = re.compile(r"(?:zam[oó]wieni[aeu]|order(?: number)?|nr|numer|numerze)\s*(?:nr\.?|no\.?|#|:)?\s*:?\s*([A-Z]{0,5}[-#]?\d[\w\-/]{3,})", re.I)
+TOTAL_LABELS = (r"^(łącznie|do zapłaty|razem|suma zamówienia|wartość zamówienia|kwota zamówienia|koszt całkowity|całkowita kwota"
+                r"|suma \(razem|suma łączna|total|amount paid|kwota(?! vat))\b")
+DISCOUNT_LABELS = r"^(zniżka|rabat|kod promocyjny|kupon|discount)\b"
 FINAL_LABELS = r"^(łącznie|do zapłaty|razem do zapłaty|amount paid)\b"  # итог к оплате важнее «стоимости заказа»
 FEE_LABELS = r"^(koszt (obsługi )?płatności|opłata za (płatność|pobranie)|koszt pobrania)\s*:?$"
-DELIVERY_LABELS = r"(koszt[y]? (dostawy|transportu|wysyłki)|dostawa|wysyłka)\s*:?$"
+DELIVERY_LABELS = r"(koszt[y]? (dostawy|transportu|wysyłki)|dostawa|dostawa i płatność|wysyłka|przesyłka)\s*:?$"
 
 
 def find_order(lines, subject) -> str | None:
@@ -181,7 +183,7 @@ def find_order(lines, subject) -> str | None:
 def pay_after_label(lines) -> tuple[str | None, str]:
     """«Forma płatności:» и способ — в той же строке или в нескольких следующих (в счетах-фактурах — таблица)."""
     for i, ln in enumerate(lines):
-        if re.match(r"^(sposób|metoda|forma) (płatności|zapłaty)", ln, re.I):
+        if re.match(r"^((sposób|metoda|forma) (płatn?ości|zapłaty)|payment method)", ln, re.I):  # «Metoda płatości» — опечатка Modivo
             for cand in [ln] + lines[i + 1:i + 6]:
                 if m := MP.payment_method(cand):
                     return m, cand
@@ -205,6 +207,92 @@ def pdf_payment(msg) -> str | None:
     return None
 
 
+def idosell_items(lines) -> list[dict]:
+    """Магазины на IdoSell: «ZAMÓWIONE PRODUKTY» -> название / вариант / «Ilość:» «1 szt.» /
+    «Rozmiar:» … / цена строки. Количество — на строке после «Ilość:», поэтому общий разбор его не видит."""
+    start = next((k for k, ln in enumerate(lines) if ln.strip().upper() in ("ZAMÓWIONE PRODUKTY", "ZAMOWIONE PRODUKTY")), None)
+    if start is None:  # другой шаблон: «INFORMACJE O ZAMÓWIENIU NR - 123456», дальше сразу товары
+        start = next((k for k, ln in enumerate(lines) if re.match(r"^INFORMACJE O ZAMÓWIENIU NR", ln.strip(), re.I)), None)
+    if start is None:
+        return []
+    out, block = [], []
+    for ln in lines[start + 1:]:
+        s = ln.strip()
+        if re.match(r"^(Zamawiający|Kurier|W każdej chwili|Szczegóły zamówienia|Dane do|Adres dostawy|Podsumowanie"
+                    r"|Wartość produktów|Wartość zamówienia|Łącznie|Razem|Do zapłaty|Sposób płatności|Koszt|Dostawa:"
+                    r"|Forma płatności)", s):
+            break  # дальше — итоги и данные заказа, а не товары
+        if re.fullmatch(AMT + r"\s*(?:zł|PLN)", s, re.I):  # строка с одной ценой — конец товара
+            if block and any(x.lower().startswith("ilość") for x in block):  # товар IdoSell всегда с «Ilość:»
+                # «Ilość:» + «1 szt.» на следующей строке или «Ilość: 2 szt.» в одной
+                qty = next((num(m.group(1)) for k, b in enumerate(block) if b.lower().startswith("ilość")
+                            and (m := re.search(r"(\d+(?:[.,]\d+)?)\s*szt", b + " " + (block[k + 1] if k + 1 < len(block) else "")))), 1.0)
+                price = amt(s)
+                out.append({"name": block[0], "product_code": None, "qty": qty, "unit_price": round(price / qty, 2),
+                            "amount": price, "discount": None})
+            block = []
+        elif s:
+            block.append(s)
+    return out
+
+
+def qty_items(lines) -> list[dict]:
+    """Zalando, Modivo: «марка» / «название» / «Rozmiar: M» / «Ilość: 1» (или «Ilość:» / «1») / «135,95 zł».
+    Название — до двух строк перед количеством, без размеров/цветов и кодов товара."""
+    out = []
+    for n, ln in enumerate(lines):
+        m = re.match(r"^(?:Quantity|Ilość)\s*:\s*(\d+)?\s*$", ln.strip(), re.I)
+        if not m:
+            continue
+        k, qty = n + 1, m.group(1)
+        if qty is None and k < len(lines) and re.fullmatch(r"\d+", lines[k].strip()):
+            qty, k = lines[k].strip(), k + 1
+        if k < len(lines) and lines[k].strip().startswith("Dostępność"):  # «Dostępność:» / «W magazynie»
+            k += 2 if lines[k].strip().endswith(":") else 1
+        if qty is None or k >= len(lines) or not re.fullmatch(AMT + r"\s*(?:zł|PLN)", lines[k].strip(), re.I):
+            continue
+        name, j = [], n - 1
+        attr = r"^(Size|Rozmiar|Kolor|Colou?r)[^:]*:"
+        while j >= 0 and len(name) < 2:
+            s = lines[j].strip()
+            if re.match(attr, s, re.I) or j and re.match(attr + r"\s*$", lines[j - 1].strip(), re.I):
+                pass           # «Size: S» или «Rozmiar odzieży:» / «S» — размер, не название
+            elif re.fullmatch(r"\d{6,}", s):
+                pass           # код товара
+            elif ":" in s or re.search(r"\b20\d\d\b", s) or amt(s) is not None or re.fullmatch(TABLE_HEAD, s, re.I):
+                break          # метка заказа, дата доставки, цена прошлого товара, заголовок таблицы — блок товара кончился
+            else:
+                name.insert(0, s)
+            j -= 1
+        if name:
+            price = amt(lines[k])
+            out.append({"name": " ".join(name), "product_code": None, "qty": num(qty), "unit_price": round(price / num(qty), 2),
+                        "amount": price, "discount": None})
+    return out
+
+
+TABLE_HEAD = r"Produkt|Cena|Ilość|Kwota|Wartość"
+
+
+def row_items(lines) -> list[dict]:
+    """Таблица «Produkt / Ilość / Kwota» (аптеки, магазины посуды): «название» / [«Cena jednostkowa …» / «Numer modelu: …»] /
+    «1» / «28,78 zł». У товара со скидкой следом идёт старая цена — она не товар: перед ней нет количества."""
+    out = []
+    for n in range(1, len(lines) - 1):
+        if not (re.fullmatch(r"\d{1,2}", lines[n].strip()) and re.fullmatch(AMT + r"\s*(?:zł|PLN)", lines[n + 1].strip(), re.I)):
+            continue
+        j = n - 1
+        while j > 0 and re.match(r"^(Cena jednostkowa|Numer modelu|Dostępność|ul\. )", lines[j].strip(), re.I):
+            j -= 1
+        name, price = lines[j].strip(), amt(lines[n + 1])
+        if ":" in name or amt(name) is not None or re.fullmatch(TABLE_HEAD + r"|\d+", name, re.I) or not price:
+            continue
+        qty = num(lines[n])
+        out.append({"name": name, "product_code": None, "qty": qty, "unit_price": round(price / qty, 2),
+                    "amount": price, "discount": None})
+    return out
+
+
 def parse_generic(lines, subject) -> dict | None:
     order = find_order(lines, subject)
     items, n = [], 0
@@ -214,6 +302,11 @@ def parse_generic(lines, subject) -> dict | None:
         if m and n >= 1:
             qty, price = num(m.group(1)), num(m.group(2).replace(" ", ""))
             items.append({"name": lines[n - 1], "product_code": None, "qty": qty, "unit_price": price,
+                          "amount": round(qty * price, 2), "discount": None})
+        elif (m := re.match(r"^x\s*" + AMT + r"\s*(?:zł|PLN)", ln, re.I)) and n >= 2 and re.fullmatch(r"\d+", lines[n - 1].strip()):
+            # DOZ: «Название» / «1» / «x 16.49 zł» / «16.49 zł»
+            qty, price = num(lines[n - 1]), num(m.group(1).replace(" ", ""))
+            items.append({"name": lines[n - 2], "product_code": None, "qty": qty, "unit_price": price,
                           "amount": round(qty * price, 2), "discount": None})
         elif re.match(r"^Ilość\s*:\s*(\d+)", ln) and n >= 3:
             qty = num(re.match(r"^Ilość\s*:\s*(\d+)", ln).group(1))
@@ -227,15 +320,30 @@ def parse_generic(lines, subject) -> dict | None:
                 items.append({"name": name, "product_code": None, "qty": qty, "unit_price": price,
                               "amount": round(qty * price, 2), "discount": None})
         n += 1
+    if not items:
+        items = idosell_items(lines) or qty_items(lines) or row_items(lines)
     total = find_after(lines, FINAL_LABELS, 2) or find_after(lines, TOTAL_LABELS, 2)
+    if not items and total is not None:  # запись к врачу: «Usługa:» / «USG …» / «Kwota: 250.00 PLN»
+        svc = next(((m.group(1) or (lines[k + 1] if k + 1 < len(lines) else "")).strip() for k, ln in enumerate(lines)
+                    if (m := re.match(r"^Usługa\s*:\s*(.*)$", ln.strip(), re.I))), None)
+        if svc:
+            items = [{"name": svc, "product_code": None, "qty": 1, "unit_price": total, "amount": total, "discount": None}]
     # доставка и плата за способ оплаты (наложенный платёж и т.п.) — отдельными позициями, если с ними сходится итог
-    extras = [(name, v) for name, rx in (("Dostawa", DELIVERY_LABELS), ("Koszt płatności", FEE_LABELS))
-              if (v := find_after(lines, rx, 2))]
+    # скидка на весь заказ («Zniżka (KOD) -25,00 zł») — тоже, если с ней сходится итог
+    extras = [(name, v) for name, rx in (("Dostawa", DELIVERY_LABELS), ("Koszt płatności", FEE_LABELS), ("Скидка", DISCOUNT_LABELS))
+              if (v := find_after(lines, rx, 2)) and (v < 0) == (name == "Скидка")]
     if items and total:
         base = sum(i["amount"] for i in items)
         fit = next((c for k in range(len(extras), 0, -1) for c in combinations(extras, k)
                     if abs(base + sum(v for _, v in c) - total) < 0.05), ())
-        items += [{"name": n, "product_code": None, "qty": 1, "unit_price": v, "amount": v, "discount": None} for n, v in fit]
+        if disc := -sum(v for n, v in fit if n == "Скидка"):  # делим на товары пропорционально цене — категории не страдают
+            left = disc
+            for i in items[:-1]:
+                i["discount"] = round(disc * i["amount"] / base, 2)
+                left -= i["discount"]
+            items[-1]["discount"] = round(left, 2)
+        items += [{"name": n, "product_code": None, "qty": 1, "unit_price": v, "amount": v, "discount": None}
+                  for n, v in fit if n != "Скидка"]
     payment, pay_line = pay_after_label(lines)
     if total is None and not items:
         return None
@@ -250,12 +358,16 @@ PAYEES = local_pairs("mail_payees") + [
     (r"grupa olx|\bolx\b", "OLX"), (r"apo-discounter", "Apo-Discounter"),
     (r"allegro", "Allegro"), (r"doz\b|doz\.pl", "DOZ.pl"), (r"modivo", "Modivo"), (r"zalando", "Zalando"),
     (r"medicover", "Medicover")]
+# «Ekspres Przelewy24 — przekazano do realizacji» — не подтверждение: платить мог и не ты (письмо приходит
+# тому, кто оформил), а без списания в выписке такой платёж должен уйти «под вопрос», а не в расходы
 CONFIRMED_RX = re.compile(r"potwierdzeni|confirmation|zaksięgowan|zaksiegowan|przekazaliśmy|completed|zrealizowan", re.I)
 
 
 def parse_payment(lines, subject) -> dict | None:
     text = "\n".join(lines)
-    total = find_after(lines, r"(kwota transakcji|transaction amount|kwota|amount|wartość)", 2)
+    ls = [ln.strip() for ln in lines if ln.strip() and ln.strip() != ":"]
+    # «Łączna kwota» — с комиссией за перевод (Autopay: 450 + 1 zł)
+    total = find_after(ls, r"^łączna kwota", 1) or find_after(lines, r"(kwota transakcji|transaction amount|kwota|amount|wartość)", 2)
     if total is None:
         return None
     # что оплачено: «for jakdojade.pl - UM <город> - 30-minutowy at City-nav» / «za KOLEO bilety kolejowe PID:.. w ASTARIUM»
@@ -266,13 +378,25 @@ def parse_payment(lines, subject) -> dict | None:
     if not payee and (m := re.search(r"\bdla\s+(.+?)(?:\s+\(|\.|$)", text, re.M)):
         payee = m.group(1)
     desc = re.sub(r"\s*PID:\d+", "", what.group(1)) if what else None
-    if not desc and (m := re.search(r"Opis zamówienia.*\n:?\n?(.+)", text)):
-        desc = m.group(1)
+    # «Opis płatności:» (PayU: название объявления OLX) / «Opis:» (Przelewy24: часто номер заказа магазина) /
+    # «Tytuł:» (Ekspres Przelewy24 — подтверждение того же платежа)
+    opis = next((m.group(1) or (ls[i + 1] if i + 1 < len(ls) else "") for i, ln in enumerate(ls)
+                 if (m := re.match(r"^(?:Opis(?: zamówienia| płatności)?|Tytuł)\s*:?\s*(.*)$", ln, re.I))), "")
+    opis = re.sub(r"^(Payment|Płatność)\s*:\s*|\s*PID:\d+", "", opis).strip(" .")
+    refs = re.findall(r"\b[A-Z]{0,5}\d[\w-]{5,}", opis)  # номера заказов в описании — для связки с письмами магазина
+    if opis and not re.fullmatch(r"[A-Z]{0,5}-?\d[\w-]{5,}", opis):  # чистый номер — не название
+        desc = desc or opis
     payee_l = (payee or "") + " " + text[:3000]
     merchant = next((name for rx, name in PAYEES if re.search(rx, payee_l, re.I)), (payee or "").strip(" .")[:60] or None)
-    ref = re.search(r"(TR-[\w-]+|P24-[\w-]+|\(\d{8,}\)|\d{10,})", subject + " " + text[:2000])
-    return {"order": ref.group(1).split("/")[0].strip("()") if ref else None, "total": total, "payment": "online",
-            "merchant": merchant, "confirmed": bool(CONFIRMED_RX.search(subject + " " + text[:600])),
+    # номер транзакции: код Tpay/Przelewy24 или PayU в теме; иначе — из строки «ID/Identyfikator transakcji»
+    # (длинные числа в подвале письма — KRS посредника, одинаковый у всех платежей)
+    strong = re.search(r"(TR-[\w-]+|P24-[\w-]+)", subject + " " + text[:2000]) or re.search(r"\((\d{8,})\)", subject)
+    ref = strong.group(1).split("/")[0] if strong else next(
+        (m.group(1) or (ls[i + 1] if i + 1 < len(ls) else None) for i, ln in enumerate(ls)
+         if (m := re.match(r"^(?:Numer|ID|Identyfikator) transakcji\s*:?\s*(\S*)$", ln, re.I))), None)
+    blik = re.search(r"TR-[\w-]+/(\d{8,})", subject + " " + text[:2000])  # Tpay: «TR-AAA-BBBBBBX/88000000001»
+    return {"order": ref, "strong_ref": bool(strong), "pay_ref": blik.group(1) if blik else None, "total": total, "payment": "online",
+            "merchant": merchant, "refs": refs, "desc": bool(desc), "confirmed": bool(CONFIRMED_RX.search(subject + " " + text[:600])),
             "items": [{"name": (desc or f"Оплата: {merchant}")[:120], "product_code": None, "qty": 1,
                        "unit_price": total, "amount": total, "discount": None}]}
 
@@ -384,6 +508,7 @@ def parse_all(verbose=True):
     con.execute("DELETE FROM items WHERE purchase_id LIKE 'email:%'")
     con.execute("DELETE FROM payments WHERE purchase_id LIKE 'email:%'")
     con.execute("DELETE FROM purchases WHERE source = 'email'")
+    con.execute("UPDATE purchases SET pay_ref = NULL")  # номера BLIK раздаются заново (ниже, из писем посредников)
     saved, warn = 0, 0
     for (dom, order), o in orders.items():
         items = o.get("items") or []
@@ -415,27 +540,48 @@ def parse_all(verbose=True):
         saved += 1
 
     # платёжные посредники: письма одной транзакции склеиваем (подтверждение важнее регистрации),
-    # и берём только то, чего нет у магазинов (сумма до копейки, ±1 день)
-    by_ref = {}
-    for p in payments:
+    # и берём только то, чего нет у магазинов (сумма до копейки, ±1 день); операции банка не в счёт —
+    # с ними письмо сверит match(), иначе оно терялось и в банке оставался «BLIK без названия»
+    by_ref, by_desc = {}, {}
+    for p in sorted(payments, key=lambda p: p["date"]):
         key = (p["domain"], p.get("order") or p["date"])
+        # «Ekspres Przelewy24 — przekazano do realizacji» без кода P24: тот же платёж, что регистрация с тем же
+        # описанием и суммой в тот же день — склеиваем, чтобы не было второй покупки
+        sig = (p["domain"], p["items"][0]["name"], p["total"])
+        if p["desc"] and not p["strong_ref"] and sig in by_desc and \
+                abs((dt.datetime.fromisoformat(p["date"][:19]) - dt.datetime.fromisoformat(by_desc[sig][1][:19])).days) <= 1:
+            key = by_desc[sig][0]
+        if p["desc"]:
+            by_desc.setdefault(sig, (key, p["date"]))
         prev = by_ref.get(key)
         if prev is None or (p["confirmed"], len(p["items"][0]["name"])) > (prev["confirmed"], len(prev["items"][0]["name"])):
-            by_ref[key] = p | {"confirmed": p["confirmed"] or (prev or {}).get("confirmed", False)}
-    have = [(r["total"], r["date"], r["merchant"]) for r in
-            con.execute("SELECT total, date, merchant FROM purchases WHERE total IS NOT NULL")]
+            by_ref[key] = p | {"confirmed": p["confirmed"] or (prev or {}).get("confirmed", False),
+                               "merchant": (prev or {}).get("merchant") or p.get("merchant")}
+        if p.get("pay_ref"):  # номер BLIK есть только в подтверждении — сохраняем, какое бы письмо ни осталось
+            by_ref[key]["pay_ref"] = p["pay_ref"]
+    have = [(r["total"], r["date"], r["merchant"], r["id"]) for r in
+            con.execute("SELECT id, total, date, merchant FROM purchases WHERE total IS NOT NULL AND source != 'bank'")]
+    shop_orders = {str(order) for _, order in orders}
     extra = 0
     for (dom, ref), p in sorted(by_ref.items(), key=lambda kv: kv[1]["date"]):
         d = dt.datetime.fromisoformat(p["date"][:19])
+        if shop_orders.intersection(p.get("refs") or []):
+            continue  # «Opis: 10900000000001» — оплата заказа, который уже есть из писем магазина
         # та же сумма ±1 день — или тот же магазин ±10 дней (заказ оплачен переводом позже)
-        if any(abs((t or 0) - p["total"]) < 0.01 and
-               abs((dt.datetime.fromisoformat(dd[:19]) - d).days) <= (10 if m == p.get("merchant") else 1)
-               for t, dd, m in have if dd):
+        same = [(abs((dt.datetime.fromisoformat(dd[:19]) - d).total_seconds()), pid) for t, dd, m, pid in have
+                if dd and abs((t or 0) - p["total"]) < 0.01
+                and abs((dt.datetime.fromisoformat(dd[:19]) - d).days) <= (10 if m == p.get("merchant") else 1)]
+        if same:
+            gap, pid = min(same)
+            if p.get("pay_ref") and gap <= 86400:  # номер BLIK — покупке магазина, ближайшей по времени (билет KOLEO)
+                con.execute("UPDATE purchases SET pay_ref = ? WHERE id = ?", (p["pay_ref"], pid))
             continue
         pid = f"email:{dom}:{ref}"
         save_purchase(con, {"id": pid, "source": "email", "date": p["date"][:19], "merchant": p.get("merchant") or dom,
                             "store": f"через {dom}", "total": p["total"], "payment_method": "online",
                             "raw_path": p["path"]}, p["items"], [{"method": "online", "amount": p["total"], "card_last4": None}])
+        if p.get("pay_ref"):
+            con.execute("UPDATE purchases SET pay_ref = ? WHERE id = ?", (p["pay_ref"], pid))
         if not p["confirmed"]:
             con.execute("UPDATE purchases SET note = ? WHERE id = ?",
                         ("регистрация платежа без подтверждения — проверить по банку", pid))

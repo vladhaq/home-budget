@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS item_notes (purchase_id TEXT, line INTEGER, name TEXT
     PRIMARY KEY (purchase_id, line));
 -- платёж «под вопросом» (регистрация без подтверждения, которой нет в банке), который ты подтвердил: считать
 CREATE TABLE IF NOT EXISTS confirmed_purchases (id TEXT PRIMARY KEY, created TEXT);
+-- регулярный платёж / поступление (аналитика): confirmed — подтвердил, rejected — «не регулярное»
+CREATE TABLE IF NOT EXISTS recurring_marks (key TEXT PRIMARY KEY, state TEXT NOT NULL, created TEXT);
 -- наличные: твои записи и уточнённое время операций банка (банк даёт только дату)
 CREATE TABLE IF NOT EXISTS wallet_entries (
     id INTEGER PRIMARY KEY, date TEXT NOT NULL, kind TEXT NOT NULL, amount REAL NOT NULL, note TEXT
@@ -128,7 +130,13 @@ def m3_single_link(con):
         con.execute("ALTER TABLE bank_tx DROP COLUMN purchase_id")
 
 
-MIGRATIONS = [m1_legacy_columns, m2_keys_refunds_doubts, m3_single_link]  # номер миграции = позиция + 1; только дописывать в конец
+def m4_pay_ref(con):
+    """pay_ref — номер операции BLIK из письма посредника («TR-…/88000000001»): в выписке он же в описании
+    («00000088000000001»), по нему покупка сверяется с операцией точно, а не по сумме и дате."""
+    add_columns(con, "purchases", {"pay_ref": "TEXT"})
+
+
+MIGRATIONS = [m1_legacy_columns, m2_keys_refunds_doubts, m3_single_link, m4_pay_ref]  # номер миграции = позиция + 1; только дописывать в конец
 
 
 def migrate(con):

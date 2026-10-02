@@ -105,7 +105,8 @@ KEYWORDS = [
                  r"|jager|warka|carlsberg|heineken|desperados|kozel|radler|cydr"),
     ("goods.electronics", r"\betui\b|szklo (na|ochron|hartow)|szklo ochronne|folia ochron|ochrona na ekran|ladowark|supervooc"
                     r"|power ?bank|smart ?band|smart plug|inteligentn\w* gniazd|czujnik temperatur|uchwyt (do|na) (monitor|telefon)"
-                    r"|uchwyt stolowy do monitor|adapter vesa|sluchawk|kabel|przewod usb"),
+                    r"|uchwyt stolowy do monitor|adapter vesa|sluchawk|kabel|przewod usb"
+                    r"|smartfon|telefon komork|oneplus|motorola|redmi|iphone|\b\d+ ?gb ?/? ?\d+ ?gb\b|\b\d+/\d+ ?gb\b"),
     ("goods.appliances", r"odkurzacz|oczyszczacz powietrz|pralk|lodowk|zmywark|mikrofal|czajnik|toster|blender|zelazk"
                          r"|frytkownic|ekspres do kaw|robot (kuchen|sprzat)|suszarka do wlos|nawilzacz|grzejnik"),
     ("home.repair", r"uszczelk|wentylator|nawiewnik|deska sedesow|regulator obrot|wago|zlaczk|szybkozlaczk|tester napiec|przewod przylacz"
@@ -125,7 +126,8 @@ KEYWORDS = [
     ("health.hygiene", r"patycz|szampon|prysz|aquafresh|pasta do z|szczot|gillette|krem do rak|gabka|maszynk|garnier"
                             r"|dezodor|mydlo|balsam|odzywk|krem do|krem na|krem nawil|tusz do rz|pomadk|lakier do paz|chusteczk|wacik"
                             r"|patyczk|podpask|tampon|pieluch|nivea|dove\b|colgate|oral-b"),
-    ("goods.clothes", r"skarpet|koszul|spodni|bluz|kurtk|czapk|rekawicz|majtk|biustonosz|buty|klapk|legginsy|t-shirt"),
+    ("goods.clothes", r"skarpet|koszul|spodni|bluz|kurtk|czapk|rekawicz|majtk|biustonosz|buty|klapk|legginsy|t-shirt"
+                      r"|szort|shorts|spodenk|jeans"),
     ("goods.electronics", r"sluchawk|glosnik|mysz\b|klawiatur|pendrive|powerbank|etui na tel"),
     ("health.vitamins", r"multiwit|witamin|magnez|elektrolit|tabl\.|whey|protein\b|kreatyn"),
     ("health.pharmacy", r"strepsils|ibuprom|\bapap\b|rutinoscorbin|na kaszel|na gardlo|plaster(?! miod)"),

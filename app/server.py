@@ -181,8 +181,10 @@ def _top_groups(con) -> dict:
 @app.get("/api/wallet")
 def wallet_get():
     from core import wallet
+    from core.analytics import bank_balance
     con = wallet.db()
-    return jsonify(wallet.timeline(con) | {"kinds": wallet.KINDS})
+    bal, as_of = bank_balance(con)  # остаток на счёте PKO — для карточки «всего: наличные + карта»
+    return jsonify(wallet.timeline(con) | {"kinds": wallet.KINDS, "bank": {"balance": bal, "date": as_of}})
 
 
 @app.post("/api/wallet/add")
@@ -345,29 +347,43 @@ def _deals_summary():
 
 # ---------------------------------------------------------------- скидки Lidl (газетки)
 
+def _store():
+    s = (request.args.get("store") or (request.get_json(silent=True) or {}).get("store") or "lidl").lower()
+    return s if s in ("lidl", "kaufland") else "lidl"
+
+
 @app.get("/api/deals")
 def deals_state():
     from core import deals
-    L = deals.mod()
-    idx = deals.index()
-    positions = [{"q": q, "deals": deals.search(q, idx)} for q in L.watchlist()]
+    L, store = deals.mod(), _store()
+    idx = deals.index(store)
+    positions = [{"q": q, "deals": deals.search(q, idx, store)} for q in deals.src(store).watchlist()]
     flyers = [{"name": f["name"], "start": f["start"], "end": f["end"], "slug": s}
               for s, f in (idx or {}).get("flyers", {}).items()]
-    return jsonify({"updated": (idx or {}).get("updated"), "flyers": sorted(flyers, key=lambda f: f["start"]),
+    return jsonify({"updated": (idx or {}).get("updated"), "flyers": sorted(flyers, key=lambda f: f["start"]), "store": store,
                     "positions": positions, "telegram": deals.telegram_state(), "sent": len(L.load_json(L.SENT, []))})
+
+
+@app.get("/api/deals/compare")
+def deals_compare():
+    from core import deals
+    return jsonify(deals.compare())
 
 
 @app.get("/api/deals/search")
 def deals_search():
     from core import deals
     q = request.args.get("q", "").strip()
-    return jsonify({"q": q, "deals": deals.search(q) if q else []})
+    return jsonify({"q": q, "deals": deals.search(q, store=_store()) if q else []})
 
 
 @app.post("/api/deals/update")
 def deals_update():
     from core import deals
-    idx = deals.mod().update(verbose=False)
+    try:
+        idx = deals.src(_store()).update(verbose=False)
+    except Exception as e:  # noqa: BLE001 — сайт магазина недоступен
+        return jsonify(ok=False, error=f"газетки не скачались: {e}"), 502
     return jsonify(ok=True, flyers=len(idx["flyers"]))
 
 
@@ -379,10 +395,10 @@ def deals_watch():
     if not q:
         return jsonify(ok=False, error="пустой запрос"), 400
     if b.get("action") == "remove":
-        L.remove_position(q)
+        deals.src(_store()).remove_position(q)
     else:
-        L.add_position(q)
-    return jsonify(ok=True, positions=L.watchlist())
+        deals.src(_store()).add_position(q)
+    return jsonify(ok=True, positions=deals.src(_store()).watchlist())
 
 
 @app.post("/api/deals/remind")
@@ -390,7 +406,7 @@ def deals_remind():
     from core import deals
     b = request.get_json()
     try:
-        made = deals.remind(b["q"], b.get("keys") or [])
+        made = deals.remind(b["q"], b.get("keys") or [], _store())
     except RuntimeError as e:
         return jsonify(ok=False, error=str(e)), 400
     return jsonify(ok=True, made=made)
@@ -410,13 +426,32 @@ def deals_settings():
 def deals_history():
     from core import deals
     q = request.args.get("q", "").strip()
-    return jsonify({"q": q, "items": deals.history(q) if q else []})
+    from core import prices
+    store = _store()
+    return jsonify({"q": q, "items": deals.history(q, store=store) if q else [],
+                    "receipts": prices.history(q, store) if q else []})
 
 
 @app.get("/api/deals/inflation")
 def deals_inflation():
     from core import deals
-    return jsonify(deals.inflation())
+    return jsonify(deals.inflation(_store()))
+
+
+# ---------------------------------------------------------------- аналитика
+
+@app.get("/api/analytics")
+def analytics_report():
+    from core import analytics
+    return jsonify(analytics.report())
+
+
+@app.post("/api/analytics/mark")
+def analytics_mark():
+    from core import analytics
+    b = request.get_json()
+    analytics.mark(b["key"], b.get("state"))
+    return jsonify(ok=True)
 
 
 # ---------------------------------------------------------------- удалённые покупки и комментарии к позициям
