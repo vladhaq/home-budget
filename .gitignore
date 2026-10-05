@@ -6,6 +6,7 @@ config.ini
 data/
 backups/
 receipts/inbox/
+bank/inbox/
 lidl-deals/config.ini
 lidl-deals/data/
 lidl-deals/постоянные_позиции.txt

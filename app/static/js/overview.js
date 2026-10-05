@@ -34,13 +34,72 @@ function pname(k, g) {
   if (g === "quarter") return `${k.slice(6)} квартал ${k.slice(0, 4)}`;
   return `${k} год`;
 }
-function granBar(range) {  // переключатель день/неделя/... и «хлебные крошки» после двойного клика
+// ---------- вид графика: столбцы / линия / кольцо долей (выбор запоминается в браузере)
+const CTYPE_KEY = "budget-chart-type";
+S.ctype = (() => { try { return localStorage.getItem(CTYPE_KEY) || "bar"; } catch (e) { return "bar"; } })();
+const CTYPES = [["bar", "столбцы", '<path d="M6 19v-7"/><path d="M12 19V5"/><path d="M18 19v-10"/>'],
+                ["line", "линия", '<path d="M3 17l5-6 4 3 8-9"/>'],
+                ["donut", "кольцо", '<circle cx="12" cy="12" r="7.5"/><path d="M12 4.5V12l5.3 5.3"/>']];
+// цвета долей кольца — по месту категории в дереве: у «Еды» один цвет в любом месяце
+// (если цвет уже занят долей крупнее — следующий свободный: соседние доли всегда разных цветов)
+const PALETTE = ["#8b5cf6", "#14b8a6", "#f59e0b", "#3b82f6", "#ec4899", "#22c55e", "#f97316", "#06b6d4", "#ef4444",
+                 "#a3e635", "#e879f9", "#facc15"];
+function ctypeTabs(donutOK) {
+  const cur = S.ctype === "donut" && !donutOK ? "bar" : S.ctype;
+  return `<div class="tabs ctabs" data-key="ctype">${CTYPES.map(([k, n, d]) => {
+    const off = k === "donut" && !donutOK;
+    return `<button class="${cur === k ? "on" : ""}" data-ctype="${k}" ${off ? "disabled" : ""} title="${off
+      ? "кольцо — когда в выбранном больше одной категории" : n}">${SVG(d)}<span>${n}</span></button>`;
+  }).join("")}</div>`;
+}
+
+// доли кольца: без фильтра — группы категорий; выбрана одна — её подкатегории; выбрано несколько — они.
+// Если вышла одна доля, а у неё есть подкатегории (все поступления — «Доходы»), кольцо спускается к ним
+function donutParts(rows, pickOverride = null) {
+  const pick = pickOverride || [...S.F.cats].map(String);
+  const one = pick.length === 1 && CAT[pick[0]] ? pick[0] : null;
+  const order = (!pick.length ? KIDS[0] || [] : one ? KIDS[one] || [] : pick.filter(k => CAT[k]).map(k => CAT[k])).map(c => String(c.id));
+  const up = k => k === "none" || CAT[k].parent_id == null ? "none" : String(CAT[k].parent_id);
+  const keyOf = cat => {
+    let k = cat == null || !CAT[cat] ? "none" : String(cat);
+    if (!pick.length) { while (k !== "none" && CAT[k].parent_id != null) k = up(k); return k; }
+    if (one) {  // ребёнок выбранной категории на пути к позиции; позиция прямо в ней — она сама
+      let prev = null;
+      while (k !== "none" && k !== one) { prev = k; k = up(k); }
+      return k === "none" ? "none" : prev ?? one;
+    }
+    while (!pick.includes(k) && k !== "none") k = up(k);  // ближайшая выбранная вверх по дереву
+    return k;
+  };
+  const sums = {};
+  for (const r of rows) for (const it of r.items) { const k = keyOf(it.cat); sums[k] = (sums[k] || 0) + net(it); }
+  let parts = Object.entries(sums).filter(([, v]) => v > 0.005).map(([k, v]) => (
+    {k, v, name: k === "none" ? "Неопознанные" : k === one ? `${CAT[k].name}: без подкатегории` : CAT[k].name}))
+    .sort((a, b) => b.v - a.v);
+  const only = parts.length === 1 && parts[0].k !== "none" && parts[0].k !== one ? parts[0].k : null;
+  if (only && (KIDS[only] || []).length) return donutParts(rows, [only]);
+  const used = new Set();
+  for (const p of parts) {
+    const i = order.indexOf(p.k);
+    if (i < 0) { p.color = css("--c-gray"); continue; }
+    let j = i % PALETTE.length;
+    for (let n = 0; n < PALETTE.length && used.has(j); n++) j = (j + 1) % PALETTE.length;
+    used.add(j); p.color = PALETTE[j];
+  }
+  if (parts.length > 8) {  // мелочь — одной долей
+    const rest = parts.slice(7);
+    parts = parts.slice(0, 7).concat({k: null, v: rest.reduce((s, p) => s + p.v, 0), name: `остальное (${rest.length})`, color: css("--c-gray2")});
+  }
+  return {parts, total: parts.reduce((s, p) => s + p.v, 0)};
+}
+
+function granBar(range, donutOK = false) {  // переключатель день/неделя/... и «хлебные крошки» после двойного клика
   const path = S.crumbs.map((c, i) => `<button class="linkbtn" data-crumb="${i}">${esc(c.range ? c.range.label : "всё время")}</button>`).join(" › ");
   const sides = flowSides(), flow = curFlow();
   const flowTabs = sides.out && sides.in ? `<div class="tabs" data-key="flow">${[["out", "расходы"], ["in", "поступления"], ["both", "расходы и поступления"]]
     .map(([k, n]) => `<button class="${flow === k ? "on" : ""}" data-flow="${k}">${n}</button>`).join("")}</div>` : "";
   return `<div class="ovbar"><div class="tabs" data-key="gran">${GRANS.map(([k, n]) =>
-      `<button class="${S.gran === k ? "on" : ""}" data-gran="${k}">${n}</button>`).join("")}</div>${flowTabs}
+      `<button class="${S.gran === k ? "on" : ""}" data-gran="${k}">${n}</button>`).join("")}</div>${flowTabs}${ctypeTabs(donutOK)}
     ${range ? `<span class="crumbs">${S.crumbs.length ? `<button class="chip" data-back="1">‹ назад</button> ${path} ›` : ""}
       <b>${esc(range.label)}</b></span>` : ""}</div>`;
 }
@@ -95,34 +154,66 @@ function renderOverview() {
   }
   for (const k of labels) { byKey[k] ??= []; byIn[k] ??= []; }
   if (S.period !== "all" && !labels.includes(S.period)) S.period = g === "day" || g === "week" || range ? "all" : labels[labels.length - 1];
-  main.innerHTML = `${granBar(range)}<p class="muted">Клик по столбцу — статистика периода, повторный — снять выбор.
-      Двойной клик — ${g === "day" ? "чеки этого дня" : "разбить на " + DRILL_WORD[g]}.</p>
-    ${hiddenBar()}<div class="chartbox"><canvas id="chart" height="110"></canvas></div><section id="panel"></section>`;
+  // кольцо — если есть что делить (больше одной доли) хотя бы у расходов или поступлений за весь показанный период
+  const vis = rows => rows.map(visible).filter(Boolean);
+  const donutOK = donutParts(vis(outs)).parts.length > 1 || donutParts(vis(ins)).parts.length > 1;
+  const type = S.ctype === "donut" && !donutOK ? "bar" : S.ctype;
+  const hint = type === "donut" ? "Доли категорий за выбранный период; клик по доле — показать только её (у одной категории — её подкатегории). Период — стрелками ‹ › ниже."
+    : `Клик по ${type === "line" ? "точке" : "столбцу"} — статистика периода, повторный — снять выбор.
+      Двойной клик — ${g === "day" ? "чеки этого дня" : "разбить на " + DRILL_WORD[g]}.`;
+  main.innerHTML = `${granBar(range, donutOK)}<p class="muted">${hint}</p>
+    ${hiddenBar()}${type === "donut" ? `<div class="chartbox donutbox" id="donuts"></div>`
+      : `<div class="chartbox"><canvas id="chart" height="110"></canvas></div>`}<section id="panel"></section>`;
   // суммы на графике — без скрытых глазом категорий
   const vsum = (rows, f) => +rows.reduce((s, p) => { const v = visible(p); return s + (v ? v[f] : 0); }, 0).toFixed(2);
   const spent = labels.map(k => vsum(byKey[k], "value"));
   const saved = labels.map(k => vsum(byKey[k], "saved"));
   const recv = labels.map(k => vsum(byIn[k], "value"));
-  const colors = c => labels.map(k => k === S.period || S.period === "all" ? css(c) : alpha(css(c), .4));
-  // расходы — синие (и скидки — зелёные), поступления — зелёные; вместе — расходы и поступления без скидок
-  const sets = flow === "out" ? [["потрачено, zł", spent, "--c-blue"], ["сэкономлено на скидках, zł", saved, "--c-green"]]
-    : flow === "in" ? [["поступило, zł", recv, "--c-green"]] : [["потрачено, zł", spent, "--c-blue"], ["поступило, zł", recv, "--c-green"]];
   const pc = {labels, byKey, byIn, spent, saved, recv, flow};
-  chart?.destroy();
+  chart?.destroy(); chart = null;
+  for (const d of DONUTS) d.destroy();
+  DONUTS = [];
+  if (type === "donut") { drawDonuts(pc); renderPanel(pc); return; }
+  const on = i => S.period === "all" || labels[i] === S.period;
+  // расходы — синие (и скидки — зелёные пунктиром на линии), поступления — зелёные; вместе — расходы и поступления
+  const sets = flow === "out" ? [["потрачено, zł", spent, "--c-blue"], ["сэкономлено на скидках, zł", saved, "--c-green", true]]
+    : flow === "in" ? [["поступило, zł", recv, "--c-green"]] : [["потрачено, zł", spent, "--c-blue"], ["поступило, zł", recv, "--c-green"]];
+  const dataset = ([label, data, v, minor]) => {
+    const c = css(v);
+    if (type === "bar") return {label, data, type: "bar", solid: c, borderRadius: {topLeft: 8, topRight: 8}, borderSkipped: "bottom",
+      backgroundColor: x => on(x.dataIndex) ? fade(x.chart, c, .95, .5) : fade(x.chart, c, .5, .2),
+      hoverBackgroundColor: x => fade(x.chart, c, 1, .6), glow: alpha(c, .4), glowBlur: 12};
+    const few = labels.length <= 16;
+    return {label, data, type: "line", solid: c, borderColor: c, borderWidth: minor ? 2 : 2.6, cubicInterpolationMode: "monotone",
+      borderDash: minor ? [6, 5] : [], fill: minor ? false : "origin",
+      backgroundColor: x => fade(x.chart, c, flow === "both" ? .2 : .32, 0),
+      pointRadius: x => S.period !== "all" && labels[x.dataIndex] === S.period ? 6 : few && !minor ? 3 : 0,
+      pointHoverRadius: 6, pointBackgroundColor: c, pointBorderColor: css("--panel"), pointBorderWidth: 2,
+      glow: alpha(c, minor ? .25 : .45), glowBlur: 12};
+  };
+  const band = {id: "selBand", beforeDatasetsDraw(ch) {  // на линии выбранный период — светлой полосой
+    if (type !== "line" || S.period === "all") return;
+    const i = labels.indexOf(S.period), x = ch.scales.x, a = ch.chartArea;
+    if (i < 0) return;
+    const w = labels.length > 1 ? Math.abs(x.getPixelForValue(1) - x.getPixelForValue(0)) : a.width;
+    const cx = x.getPixelForValue(i), c = ch.ctx;
+    c.save(); c.fillStyle = alpha(css("--c-blue"), .1); c.fillRect(cx - w / 2, a.top, w, a.bottom - a.top); c.restore();
+  }};
   chart = new Chart(document.getElementById("chart"), {
-    type: "bar",
-    data: {labels: labels.map(k => plabel(k, g)), datasets: sets.map(([label, data, c]) => ({label, data, backgroundColor: colors(c)}))},
-    options: {animation: chartAnim(), interaction: {mode: "index", intersect: false}, plugins: {legend: {position: "bottom"},
-        tooltip: {callbacks: {title: items => pname(labels[items[0].dataIndex], g)}}},
-      scales: {x: {grid: {display: false}, ticks: {autoSkip: true, maxRotation: 0}}},
+    type,
+    data: {labels: labels.map(k => plabel(k, g)), datasets: sets.map(dataset)},
+    plugins: [GLOW, band],
+    options: {animation: chartAnim(), interaction: {mode: "index", intersect: false}, plugins: {legend: {position: "bottom", labels: solidLegend},
+        tooltip: {callbacks: {title: items => pname(labels[items[0].dataIndex], g),
+                              label: x => ` ${x.dataset.label.replace(", zł", "")}: ${zl(x.parsed.y)}`}}},
+      scales: {x: softX({ticks: {autoSkip: true, maxRotation: 0}}), y: softY({beginAtZero: true})},
       onClick: (e, els, ch) => {
         // второй клик двойного нажатия (detail 2) пропускаем — его обрабатывает dblclick ниже. Chart.js склеивает
         // события в пределах кадра, поэтому двойной клик ловим не по времени, а настоящим событием браузера
         if (ch !== chart || !els.length || (e.native && e.native.detail > 1)) return;
         const k = labels[els[0].index];
         S.period = S.period === k ? "all" : k;  // повторный клик по выбранному — снова весь период
-        sets.forEach(([, , c], j) => { ch.data.datasets[j].backgroundColor = colors(c); });
-        ch.update("none");  // перекрашиваем, а не пересоздаём график
+        ch.update("none");  // цвета и точки считаются от S.period — перерисовываем, а не пересоздаём график
         renderPanel(pc); animateEnter(document.getElementById("panel"));
       },
       onHover: (e, els) => { e.native.target.style.cursor = els.length ? "pointer" : "default"; }},
@@ -133,6 +224,47 @@ function renderOverview() {
     if (ch === chart && els.length) drill(labels[els[0].index]);
   });
   renderPanel(pc);
+}
+
+let DONUTS = [];
+function drawDonuts({labels, byKey, byIn, flow}) {  // кольцо: доли за выбранный период; при «расходы и поступления» — два
+  const g = S.gran, all = S.period === "all";
+  const rows = by => (all ? labels.flatMap(k => by[k]) : by[S.period] || []).map(visible).filter(Boolean);
+  const when = all ? (CUR_RANGE ? CUR_RANGE.label : "всё время") : pname(S.period, g);
+  const rings = [flow !== "in" && {word: "потрачено", ...donutParts(rows(byKey))},
+                 flow !== "out" && {word: "поступило", ...donutParts(rows(byIn))}].filter(r => r && r.parts.length);
+  const box = document.getElementById("donuts");
+  if (!rings.length) { box.innerHTML = `<div class="empty">За этот период ничего нет.</div>`; return; }
+  box.innerHTML = rings.map((r, j) => `<div class="donut">
+      <div class="dwrap"><canvas id="donut${j}"></canvas>
+        <div class="dcenter"><span>${r.word}</span><b>${zl(r.total)}</b><span>${esc(when)}</span></div></div>
+      <div class="dlegend">${r.parts.map((p, i) => `<button type="button" class="dleg" data-dcat="${p.k ?? ""}" data-dj="${j}" data-di="${i}"
+          ${p.k == null ? "disabled" : ""} title="${p.k == null ? "" : "показать только эту категорию"}"><i style="--c:${p.color}"></i>
+          <span>${esc(p.name)}</span><b>${zl(p.v)}</b><em>${(p.v / (r.total || 1) * 100).toFixed(0)}%</em></button>`).join("")}</div>
+    </div>`).join("");
+  rings.forEach((r, j) => {
+    const ch = new Chart(document.getElementById("donut" + j), {
+      type: "doughnut",
+      data: {labels: r.parts.map(p => p.name), datasets: [{data: r.parts.map(p => +p.v.toFixed(2)), backgroundColor: r.parts.map(p => p.color),
+        hoverBackgroundColor: r.parts.map(p => p.color), borderWidth: 0, borderRadius: 6, spacing: 3, hoverOffset: 8}]},
+      plugins: [ARC_GLOW],
+      options: {animation: chartAnim() && {animateRotate: true, duration: 800}, cutout: "70%", maintainAspectRatio: false,
+        layout: {padding: 14}, plugins: {legend: {display: false},
+          tooltip: {callbacks: {label: x => ` ${x.label}: ${zl(x.parsed)} · ${(x.parsed / (r.total || 1) * 100).toFixed(0)}%`}}},
+        onClick: (e, els) => { const p = els.length && r.parts[els[0].index]; if (p && p.k != null) pickSlice(p.k); },
+        onHover: (e, els) => { e.native.target.style.cursor = els.length && r.parts[els[0].index].k != null ? "pointer" : "default"; }},
+    });
+    DONUTS.push(ch);
+  });
+  for (const b of box.querySelectorAll(".dleg")) {  // наведение на строку легенды подсвечивает долю
+    const ch = DONUTS[+b.dataset.dj], el = [{datasetIndex: 0, index: +b.dataset.di}];
+    b.addEventListener("mouseenter", () => { ch.setActiveElements(el); ch.tooltip.setActiveElements(el, {x: 0, y: 0}); ch.update(); });
+    b.addEventListener("mouseleave", () => { ch.setActiveElements([]); ch.tooltip.setActiveElements([], {x: 0, y: 0}); ch.update(); });
+  }
+}
+function pickSlice(k) {  // клик по доле — фильтр по этой категории (у неё самой кольцо покажет подкатегории)
+  S.F.cats = new Set([k === "none" ? "none" : +k]);
+  CHART_ANIM = true; render();
 }
 function drill(k) {
   const g = S.gran;

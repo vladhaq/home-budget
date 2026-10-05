@@ -3,6 +3,7 @@
   python budget.py bank login     согласие в PKO (окно Chrome, входишь в iPKO сам) -> сессия на срок согласия
   python budget.py bank sync      скачать операции и остатки (повторно — только новые)
   python budget.py bank status    срок согласия, последняя операция, остаток
+  python budget.py bank import [файлы]   выписка из файла (CSV, MT940, camt.053), без файлов — из bank/inbox/
 
 Нужен закрытый ключ приложения: data/bank/<application-id>.pem (скачивается при регистрации приложения).
 """
@@ -146,7 +147,7 @@ def parse_tx(t: dict, account: str) -> tuple:
 def reparse():
     """Пересобрать поля операций из сохранённого ответа банка (после правки разбора)."""
     con = connect()
-    rows = con.execute("SELECT id, raw FROM bank_tx").fetchall()
+    rows = con.execute("SELECT id, raw FROM bank_tx WHERE id NOT LIKE '%:F%'").fetchall()  # из файлов — не ответ банка
     for r in rows:
         account = r["id"].split(":")[0]
         p = parse_tx(json.loads(r["raw"]), account)
@@ -220,5 +221,8 @@ def main(argv: list[str]):
         status()
     elif cmd == "reparse":
         reparse()
+    elif cmd == "import":
+        from bank import statement
+        statement.main(argv[1:])
     else:
         print(__doc__)

@@ -165,31 +165,40 @@ function drawHistory() {
   box.innerHTML = R.map((h, i) => `<div class="hcard"><h3>${esc(h.title)} <span class="src">по чекам</span></h3>
       <div class="muted">${h.rows.length} покупок с ${ddmmyy(h.rows[0].date)}${h.change ? ` · ${zl(h.change.p0)} → ${zl(h.change.p1)} (${esc(h.change.unit)}) ${pct(h.change.pct)}` : ""}
         · последняя ${ddmmyy(h.rows[h.rows.length - 1].date)}: ${zl(h.rows[h.rows.length - 1].price)}</div>
-      <div class="chartbox" style="box-shadow:none;padding:6px 0 0;margin:6px 0 0"><canvas id="hr${i}" height="70"></canvas></div></div>`).join("") +
+      <div class="chartbox inner"><canvas id="hr${i}" height="70"></canvas></div></div>`).join("") +
     F.map((h, i) => `<div class="hcard"><h3>${esc(h.title)} <span class="src">по газеткам</span></h3>
     <div class="muted">${h.rows.length} записей с ${ddmmyy(h.rows[0].start)}${h.change ? ` · обычная цена ${zl(h.change.p0)} → ${zl(h.change.p1)} (${esc(h.unit)}) ${pct(h.change.pct)}` : ""}
       ${h.best ? ` · лучшая цена по акции ${zl(h.best.price)} (−${h.best.discount}%, ${ddmmyy(h.best.start)})` : ""}</div>
     ${Object.keys(h.season).length ? `<div class="muted">акции по месяцам: ${Object.entries(h.season).map(([mo, s]) =>
       `${MONTHS[+mo - 1]} ×${s.n} (до −${s.best}%)`).join(", ")}</div>` : ""}
-    <div class="chartbox" style="box-shadow:none;padding:6px 0 0;margin:6px 0 0"><canvas id="hc${i}" height="70"></canvas></div></div>`).join("");
+    <div class="chartbox inner"><canvas id="hc${i}" height="70"></canvas></div></div>`).join("");
+  // в стиле остальных графиков: цена — плавная линия с градиентом и свечением, скидки и акции — светящиеся точки
+  const blue = css("--c-blue");
+  const line = (label, data, extra = {}) => ({label, data, solid: blue, borderColor: blue, borderWidth: 2.4,
+    cubicInterpolationMode: "monotone", fill: "origin", backgroundColor: x => fade(x.chart, blue, .25, 0),
+    pointRadius: 3, pointHoverRadius: 5, pointBackgroundColor: blue, pointBorderColor: css("--panel"), pointBorderWidth: 2,
+    glow: alpha(blue, .4), glowBlur: 10, ...extra});
+  const dots = (label, data, c) => ({label, data, solid: c, borderColor: c, backgroundColor: c, showLine: false,
+    pointRadius: 5, pointHoverRadius: 7, pointBorderColor: css("--panel"), pointBorderWidth: 2, glow: alpha(c, .55), glowBlur: 10});
+  const opts = () => ({animation: chartAnim(), interaction: {mode: "index", intersect: false},
+    plugins: {legend: {position: "bottom", labels: solidLegend},
+              tooltip: {callbacks: {label: x => ` ${x.dataset.label.split(",")[0]}: ${zl(x.parsed.y)}`}}},
+    scales: {x: softX({ticks: {maxRotation: 0, autoSkip: true}}), y: softY()}});
   R.forEach((h, i) => {
     const unit = h.rows[0].unit === "kg" ? "zł/кг" : "zł/шт.";
-    dCharts.push(new Chart(document.getElementById("hr" + i), {type: "line",
+    dCharts.push(new Chart(document.getElementById("hr" + i), {type: "line", plugins: [GLOW],
       data: {labels: h.rows.map(r => ddmmyy(r.date)), datasets: [
-        {label: `цена на полке, ${unit}`, data: h.rows.map(r => r.price), borderColor: css("--c-blue"), pointRadius: 3, tension: .2},
-        {label: "оплатил (со скидкой)", data: h.rows.map(r => r.paid < r.price - 0.005 ? r.paid : null), borderColor: css("--c-green"),
-         backgroundColor: css("--c-green"), showLine: false, pointRadius: 5}]},
-      options: {animation: chartAnim(), plugins: {legend: {position: "bottom"}}, scales: {x: {grid: {display: false}}}}}));
+        line(`цена на полке, ${unit}`, h.rows.map(r => r.price)),
+        dots("оплатил (со скидкой)", h.rows.map(r => r.paid < r.price - 0.005 ? r.paid : null), css("--c-green"))]},
+      options: opts()}));
   });
   F.forEach((h, i) => {
     const perUnit = h.unit !== "zł/шт.", rows = h.rows;
-    dCharts.push(new Chart(document.getElementById("hc" + i), {type: "line",
+    dCharts.push(new Chart(document.getElementById("hc" + i), {type: "line", plugins: [GLOW],
       data: {labels: rows.map(r => ddmmyy(r.start)), datasets: [
-        {label: `обычная цена, ${h.unit}`, data: rows.map(r => perUnit ? r.unit_regular : r.regular), borderColor: css("--c-blue"),
-         spanGaps: true, pointRadius: 3, tension: .2},
-        {label: "по акции", data: rows.map(r => r.discount ? (perUnit ? r.unit_price : r.price) : null), borderColor: css("--c-red"),
-         backgroundColor: css("--c-red"), showLine: false, pointRadius: 5}]},
-      options: {animation: chartAnim(), plugins: {legend: {position: "bottom"}}, scales: {x: {grid: {display: false}}}}}));
+        line(`обычная цена, ${h.unit}`, rows.map(r => perUnit ? r.unit_regular : r.regular), {spanGaps: true}),
+        dots("по акции", rows.map(r => r.discount ? (perUnit ? r.unit_price : r.price) : null), css("--c-red"))]},
+      options: opts()}));
   });
 }
 async function dealsAction(fn, busy) {

@@ -53,6 +53,45 @@ function ava(name, cls = "sm") {  // кружок с буквами, цвет п
 }
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const alpha = (hex, a) => { const n = parseInt(hex.replace("#", ""), 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; };
+
+// ---------- общий вид графиков (обзор, банк, наличные): градиентная заливка, свечение, тихие оси
+// свечение под цветом линии/столбца/доли — как у неоновых графиков в референсах
+const GLOW = {id: "glow",
+  beforeDatasetDraw(ch, {index}) {
+    const ds = ch.data.datasets[index];
+    if (!ds.glow) return;
+    const c = ch.ctx; c.save(); c.shadowColor = ds.glow; c.shadowBlur = ds.glowBlur ?? 14; c.shadowOffsetY = 3;
+  },
+  afterDatasetDraw(ch, {index}) { if (ch.data.datasets[index].glow) ch.ctx.restore(); }};
+const ARC_GLOW = {id: "arcGlow", beforeDatasetDraw(ch, {meta}) {  // у кольца каждая доля светится своим цветом
+  meta.data.forEach((arc, i) => {
+    if (arc._glow) return;
+    const draw = arc.draw.bind(arc);
+    arc.draw = c => { c.save(); c.shadowColor = alpha(ch.data.datasets[0].backgroundColor[i], .55); c.shadowBlur = 16; draw(c); c.restore(); };
+    arc._glow = true;
+  });
+}};
+const fade = (ch, color, top, bottom) => {  // вертикальный градиент заливки в пределах области графика
+  const a = ch.chartArea;
+  if (!a) return alpha(color, top);
+  const g = ch.ctx.createLinearGradient(0, a.top, 0, a.bottom);
+  g.addColorStop(0, alpha(color, top)); g.addColorStop(1, alpha(color, bottom));
+  return g;
+};
+const shortZl = v => Math.abs(v) >= 1000 ? `${(v / 1000).toLocaleString("ru-RU", {maximumFractionDigits: 1})} тыс.` : v;
+// легенда — сплошным цветом ряда (solid): цвет столбцов — функция, у невыбранного периода он приглушён
+const solidLegend = {generateLabels: ch => Chart.defaults.plugins.legend.labels.generateLabels(ch).map(l => {
+  const c = ch.data.datasets[l.datasetIndex].solid;
+  return c ? {...l, fillStyle: c, strokeStyle: c} : l;
+})};
+const softX = (o = {}) => ({grid: {display: false}, border: {display: false}, ...o});
+const softY = (o = {}) => ({border: {display: false}, grid: {color: alpha(css("--c-gray"), .14)},
+                            ticks: {callback: shortZl, maxTicksLimit: 6}, ...o});
+// линия «остатка» (на счёте, наличные): градиент под линией, ниже нуля — красным, точки — кружки с обводкой фоном
+const balanceLine = (label, data, color, extra = {}) => ({label, data, borderColor: color, borderWidth: 2.4,
+  backgroundColor: x => fade(x.chart, color, .3, 0), fill: {target: "origin", below: alpha(css("--c-red"), .22)},
+  pointRadius: 0, pointHoverRadius: 5, pointBackgroundColor: color, pointBorderColor: css("--panel"), pointBorderWidth: 2,
+  glow: alpha(color, .45), glowBlur: 12, ...extra});
 function chartTheme() {  // Chart.js в цветах текущей темы
   const C = Chart.defaults;
   C.color = css("--text-2"); C.borderColor = css("--line"); C.font.family = css("--font"); C.font.size = 12;

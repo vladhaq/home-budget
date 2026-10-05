@@ -74,11 +74,30 @@ function renderCategories() {
 
 // ---------- банк: баланс, доходы и расходы, покрытие чеками, наличные
 let BANK = null, bankCharts = [];
+// выписка из файла: CSV из интернет-банка, MT940, camt.053 — то, что уже пришло из банка, не задвоится
+const importBox = () => `<div class="updbox"><b>Выписка из файла</b>
+  <span class="muted">CSV из интернет-банка, MT940 или camt.053 (XML) — любого банка; операции, которые уже есть, не задвоятся</span>
+  <label class="btn" style="margin-left:auto" title="новая функция: если банк не узнался или разобрался неверно — напиши">Добавить файлы
+    <span class="beta">beta</span><input type="file" id="stmtfile" multiple hidden
+    accept=".csv,.txt,.xml,.sta,.940,.mt940,.camt"></label></div>`;
+async function importStatements(files) {
+  const toB64 = f => new Promise((ok, bad) => { const r = new FileReader();
+    r.onload = () => ok(r.result.split(",")[1]); r.onerror = bad; r.readAsDataURL(f); });
+  toast("Разбираю выписку…", {spin: true, ms: 60000});
+  try {
+    const res = await post("/api/bank/import", {files: await Promise.all([...files].map(async f => ({name: f.name, data: await toB64(f)})))});
+    const lines = res.results.map(r => r.error ? `✗ ${r.error}`
+      : `${r.file}: ${r.format}, ${r.account}, ${ddmmyy(r.from)}–${ddmmyy(r.to)} — новых ${r.new}, уже были ${r.dup}`);
+    toast(lines.join("\n"), {ms: 9000});
+    BANK = null; WALLET = null; await load();
+  } catch (e) { toast("Не получилось: " + e.message); }
+}
 async function renderBank() {
   const main = document.getElementById("main");
   if (!BANK) BANK = await (await fetch("/api/bank")).json();
   if (BANK.empty || !Object.keys(BANK.balance).length) {
-    main.innerHTML = `<div class="empty">Выписка ещё не загружена. Подключить банк: python budget.py bank login, затем python budget.py bank sync (см. README)</div>`; return;
+    main.innerHTML = `<div class="empty">Выписка ещё не загружена. Подключить банк: python budget.py bank login, затем
+      python budget.py bank sync (см. README) — или загрузить выписку из файла:</div>${importBox()}`; return;
   }
   bankCharts.forEach(c => c.destroy()); bankCharts = [];
   const F = S.F, inRange = m => (!F.from || m >= F.from) && (!F.to || m <= F.to);
@@ -101,6 +120,7 @@ async function renderBank() {
   const incCats = {};
   for (const m of months) for (const [k, v] of Object.entries(BANK.income[m] || {})) incCats[k] = (incCats[k] || 0) + v;
   main.innerHTML = `
+    ${importBox()}
     <div class="cards">
       <div class="card">остаток на счёте<b>${zl(lastBal)}</b>на ${esc(BANK.last || "")}</div>
       <div class="card">доходы за период<b class="save">${zl(totInc)}</b>в месяц ${zl(totInc / (months.length || 1))}</div>
@@ -132,25 +152,33 @@ async function renderBank() {
     <p class="muted">Расходы — без переводов людям и снятия наличных. «Только выписка» — операции без чека: их можно
       разметить на странице «Неопознанные» или в обзоре (источник «банк»).</p>`;
   bankCharts.push(new Chart(document.getElementById("bal"), {type: "line",
-    data: {labels: days, datasets: [{label: "остаток, zł", data: days.map(d => BANK.balance[d]), borderColor: css("--c-blue"),
-      pointRadius: 0, pointHoverRadius: 4, stepped: true,
-      fill: {target: "origin", above: alpha(css("--c-blue"), .12), below: alpha(css("--c-red"), .18)}}]},
-    options: {animation: chartAnim(), interaction: {mode: "index", intersect: false}, plugins: {legend: {display: false}},
-      scales: {x: {grid: {display: false}, ticks: {maxTicksLimit: 14}}}}}));
+    data: {labels: days, datasets: [balanceLine("остаток", days.map(d => BANK.balance[d]), css("--c-blue"),
+                                                {cubicInterpolationMode: "monotone"})]},
+    plugins: [GLOW],
+    options: {animation: chartAnim(), interaction: {mode: "index", intersect: false}, plugins: {legend: {display: false},
+        tooltip: {callbacks: {label: x => ` остаток: ${zl(x.parsed.y)}`}}},
+      scales: {x: softX({ticks: {maxTicksLimit: 14, maxRotation: 0}}), y: softY({beginAtZero: true})}}}));
+  // столбцы по месяцам: градиент и свечение; выбранный месяц ярче, остальные приглушены
+  const bon = i => !S.bankMonth || months[i] === S.bankMonth;
+  const seg = v => { const c = css(v); return {borderRadius: 5, glow: alpha(c, .3), glowBlur: 8, solid: c,
+    backgroundColor: x => bon(x.dataIndex) ? fade(x.chart, c, .95, .55) : fade(x.chart, c, .35, .14),
+    hoverBackgroundColor: x => fade(x.chart, c, 1, .65)}; };
   bankCharts.push(new Chart(document.getElementById("flow"), {type: "bar",
     data: {labels: months.map(m => m.slice(5) + "." + m.slice(2, 4)), datasets: [
-      {label: "доходы", data: months.map(inc), backgroundColor: css("--c-green"), stack: "in"},
-      {label: "по чекам", data: months.map(m => mm(m).receipts || 0), backgroundColor: css("--c-blue"), stack: "out"},
-      {label: "наличными (чеки)", data: months.map(m => mm(m).cash || 0), backgroundColor: css("--c-violet"), stack: "out"},
-      {label: "только выписка", data: months.map(m => mm(m).bank_only || 0), backgroundColor: css("--c-orange"), stack: "out"},
-      {label: "другой картой", data: months.map(m => mm(m).other || 0), backgroundColor: css("--c-gray"), stack: "out"},
-      {label: "переводы и банкомат", data: months.map(m => flows(m).transfers), backgroundColor: css("--c-gray2"), stack: "tr",
+      {label: "доходы", data: months.map(inc), ...seg("--c-green"), stack: "in"},
+      {label: "по чекам", data: months.map(m => mm(m).receipts || 0), ...seg("--c-blue"), stack: "out"},
+      {label: "наличными (чеки)", data: months.map(m => mm(m).cash || 0), ...seg("--c-violet"), stack: "out"},
+      {label: "только выписка", data: months.map(m => mm(m).bank_only || 0), ...seg("--c-orange"), stack: "out"},
+      {label: "другой картой", data: months.map(m => mm(m).other || 0), ...seg("--c-gray"), stack: "out"},
+      {label: "переводы и банкомат", data: months.map(m => flows(m).transfers), ...seg("--c-gray2"), stack: "tr",
        hidden: !S.bankShow.has("transfers")}]},
-    options: {animation: chartAnim(), plugins: {legend: {position: "bottom", onClick: (e, item, legend) => {
+    plugins: [GLOW],
+    options: {animation: chartAnim(), plugins: {tooltip: {callbacks: {label: x => ` ${x.dataset.label}: ${zl(x.parsed.y)}`}},
+      legend: {position: "bottom", labels: solidLegend, onClick: (e, item, legend) => {
         const ch = legend.chart, i = item.datasetIndex, key = BANK_TYPES[i].key;
         ch.isDatasetVisible(i) ? (ch.hide(i), S.bankShow.delete(key)) : (ch.show(i), S.bankShow.add(key));
         S.bankCell = null; drawBankList();
-      }}}, scales: {x: {stacked: true, grid: {display: false}}, y: {stacked: true}},
+      }}}, scales: {x: softX({stacked: true}), y: softY({stacked: true})},
       onClick: (e, els) => { if (els.length) { const m = months[els[0].index];
         S.bankMonth = S.bankMonth === m && !S.bankCell ? null : m; S.bankCell = null; drawBankList();
         document.getElementById("banklist").scrollIntoView({behavior: "smooth"}); } }}}));
@@ -199,6 +227,7 @@ function flows(m) {  // переводы и банкомат за месяц (д
 function drawBankList() {
   const box = document.getElementById("banklist");
   if (!box) return;
+  bankCharts[1]?.update("none");  // выбранный месяц (из графика или таблицы) — ярче на графике
   // месяц целиком, как в таблице (выписка может начинаться с середины первого месяца)
   const first = Object.keys(BANK.balance).sort()[0].slice(0, 7);
   const cell = S.bankCell ? BANK_CELLS[S.bankCell] : null;
@@ -354,9 +383,12 @@ async function renderCash() {
       или как неучтённый приход наличных.</p>`;
   cashChart?.destroy();
   cashChart = new Chart(document.getElementById("cashc"), {type: "line",
-    data: {labels: ev.map(e => e.date.slice(0, 10)), datasets: [{label: "наличные, zł", data: ev.map(e => e.balance),
-      borderColor: css("--c-violet"), backgroundColor: alpha(css("--c-violet"), .12), fill: "origin", stepped: true, pointRadius: 2}]},
-    options: {animation: chartAnim(), plugins: {legend: {display: false}}}});
+    data: {labels: ev.map(e => e.date.slice(0, 10)), datasets: [balanceLine("наличные", ev.map(e => e.balance), css("--c-violet"),
+      {stepped: true, pointRadius: ev.length <= 40 ? 3 : 0})]},  // остаток меняется событиями — ступеньками
+    plugins: [GLOW],
+    options: {animation: chartAnim(), interaction: {mode: "index", intersect: false}, plugins: {legend: {display: false},
+        tooltip: {callbacks: {label: x => ` наличные: ${zl(x.parsed.y)}`}}},
+      scales: {x: softX({ticks: {maxTicksLimit: 12, maxRotation: 0}}), y: softY({beginAtZero: true})}}});
 }
 async function walletSave() {
   const amount = document.getElementById("wamount").value.replace(",", ".").replace(/\s/g, "");

@@ -113,11 +113,13 @@ def bank():
     kinds = {r["id"]: r["kind"] for r in con.execute("SELECT id, kind FROM categories")}
     K = categories.key_ids(con)
     tops = {cid: top for cid, top in _top_groups(con).items()}
-    balance = {}
-    # остаток на конец дня: внутри дня порядок — по номеру операции в банке (id «счёт:O;382»)
-    for r in con.execute("SELECT date, balance FROM bank_tx WHERE balance IS NOT NULL "
+    balance, last = {}, {}
+    # остаток на конец дня: внутри дня порядок — по номеру операции в банке (id «счёт:O;382», из файла «счёт:F…;12»);
+    # счетов несколько (подключённый и из файлов) — у каждого свой последний остаток, на графике их сумма
+    for r in con.execute("SELECT id, date, balance FROM bank_tx WHERE balance IS NOT NULL "
                          "ORDER BY date, CAST(substr(id, instr(id, ';') + 1) AS INTEGER)"):
-        balance[r["date"]] = r["balance"]
+        last[r["id"].split(":")[0]] = r["balance"]
+        balance[r["date"]] = round(sum(last.values()), 2)
     income = {}
     for r in con.execute("SELECT date, amount, category_id, counterparty, description FROM bank_tx "
                          "WHERE amount > 0 AND type NOT LIKE '%RETURN%'"):
@@ -185,6 +187,29 @@ def wallet_get():
     con = wallet.db()
     bal, as_of = bank_balance(con)  # остаток на счёте PKO — для карточки «всего: наличные + карта»
     return jsonify(wallet.timeline(con) | {"kinds": wallet.KINDS, "bank": {"balance": bal, "date": as_of}})
+
+
+@app.post("/api/bank/import")
+def bank_import():
+    """Выписка из файлов (CSV, MT940, camt.053): файл приходит в JSON как base64 — POST у нас только JSON.
+    Копия файла — в data/bank/imports/; новые операции сразу сверяются с чеками."""
+    import base64
+    from bank import statement
+    from core import reconcile
+    folder = DATA / "bank" / "imports"
+    folder.mkdir(parents=True, exist_ok=True)
+    results = []
+    for f in request.get_json().get("files", []):
+        name = re.sub(r"[^\w.\-]+", "_", f.get("name") or "statement")[-80:]
+        path = folder / f"{dt.datetime.now():%Y%m%d-%H%M%S}_{name}"
+        try:
+            path.write_bytes(base64.b64decode(f["data"]))
+            results.append(statement.import_file(path))
+        except (ValueError, KeyError, OSError) as e:
+            results.append({"file": f.get("name"), "error": str(e)})
+    if any(r.get("new") for r in results):
+        reconcile.match(verbose=False)
+    return jsonify(ok=True, results=results)
 
 
 @app.post("/api/wallet/add")

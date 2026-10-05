@@ -193,14 +193,24 @@ def step_photos(con):
 
 
 def step_bank(con):
-    from bank import enablebanking
+    from bank import enablebanking, statement
+    files = statement.import_inbox()  # выписки, положенные в bank/inbox/
+    bad = [f for f in files if "error" in f]
+    from_files = sum(f.get("new", 0) for f in files)
     if not enablebanking.SESSION.exists():
-        raise Skip("не подключено", "python budget.py bank login")
+        if not files:
+            raise Skip("не подключено", "python budget.py bank login — или положи выписку (CSV, MT940, camt.053) в bank/inbox/")
+        last = con.execute("SELECT max(date) FROM bank_tx").fetchone()[0]
+        return ("warn" if bad else "ok"), f"из файлов: новых операций {from_files}, выписка по {last}" + \
+            (f"; не разобраны: {', '.join(f['file'] for f in bad)}" if bad else "")
     before = count(con, "SELECT count(*) FROM bank_tx")
     enablebanking.sync()
     new = count(con, "SELECT count(*) FROM bank_tx") - before
     last = con.execute("SELECT max(date) FROM bank_tx").fetchone()[0]
-    summary = f"новых операций: {new}, выписка по {last}"
+    summary = f"новых операций: {new}, выписка по {last}" + (f" (из файлов: {from_files})" if files else "") + \
+        (f"; не разобраны: {', '.join(f['file'] for f in bad)}" if bad else "")
+    if bad:
+        return "warn", summary
     days = consent_days_left()
     if days is not None and days <= 21:
         return "warn", summary + f". Доступ к банку закончится через {plural(days, 'день', 'дня', 'дней')} — " \

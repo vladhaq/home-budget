@@ -94,6 +94,9 @@ async function setCategory(body) {
 }
 
 // ---------- события
+document.addEventListener("change", e => {  // выписка из файла на странице «Банк»
+  if (e.target.id === "stmtfile" && e.target.files.length) importStatements(e.target.files);
+});
 document.addEventListener("click", async e => {
   if (e.target.closest("#picker, #modal, #toast")) return;
   const cp = e.target.closest("code[data-copy]");
@@ -202,6 +205,12 @@ document.addEventListener("click", async e => {
   }
   if ("rmark" in t.dataset) { await markRecurring(t.dataset.rkey, t.dataset.rmark); return; }
   if (t.dataset.flow) { S.flow = t.dataset.flow; S.period = "all"; CHART_ANIM = true; renderOverview(); return; }
+  if (t.dataset.ctype) {  // вид графика: столбцы / линия / кольцо
+    S.ctype = t.dataset.ctype;
+    try { localStorage.setItem(CTYPE_KEY, S.ctype); } catch (err) { /* только до перезагрузки */ }
+    CHART_ANIM = true; renderOverview(); return;
+  }
+  if (t.dataset.dcat) { pickSlice(t.dataset.dcat); return; }  // строка легенды кольца
   if (t.dataset.bopen) {
     const k = t.dataset.bopen; S.bankOpen.has(k) ? S.bankOpen.delete(k) : S.bankOpen.add(k);
     S.bankJust = S.bankOpen.has(k) ? k : null; drawBankList(); S.bankJust = null; return;

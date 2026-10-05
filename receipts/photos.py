@@ -120,31 +120,40 @@ def easyocr_text(img: Image.Image) -> str | None:
     return "\n".join(lines)
 
 
+EASYOCR_WEIGHT = 2  # у EasyOCR другие ошибки, чем у Tesseract, а вариант у него один — двойной вес
+
+
+def tesseract_texts(page) -> list[str]:
+    """Все варианты подготовки картинки через Tesseract (текстовая страница PDF — как есть)."""
+    if isinstance(page, str):
+        return [page]
+    exe = tesseract_exe()
+    return [tesseract(img, psm, exe) for img, psm in variants(page)]
+
+
+def vote(tess: list[str], easy, hint_date: str | None = None, verbose=False) -> tuple[dict, list[str]]:
+    """Голосование, как в программе: сначала варианты Tesseract; если сумма позиций не сошлась с итогом —
+    добавляется EasyOCR. easy — текст EasyOCR или функция, которая его вернёт (OCR дорогой — только по нужде).
+    -> (чек, тексты, которые участвовали)"""
+    runs = [parse_text(t) for t in tess]
+    result = merge(runs, hint_date)
+    if result["status"] == "ok" or easy is None:
+        return result, list(tess)
+    if verbose:
+        print("  Tesseract не сошёлся с итогом — перепроверяю EasyOCR")
+    text = easy() if callable(easy) else easy
+    if not text:
+        return result, list(tess)
+    return merge(runs + [parse_text(text)] * EASYOCR_WEIGHT, hint_date), list(tess) + ["### EasyOCR\n" + text]
+
+
 def recognize(path: Path, hint_date: str | None = None, verbose=False) -> tuple[dict, str]:
     """-> (чек после голосования, весь распознанный текст для архива)"""
     pages = load(path)
-    runs, texts = [], []
-    exe = None
-    for page in pages:
-        if isinstance(page, str):
-            runs.append(parse_text(page))
-            texts.append(page)
-            continue
-        exe = exe or tesseract_exe()
-        for img, psm in variants(page):
-            t = tesseract(img, psm, exe)
-            texts.append(t)
-            runs.append(parse_text(t))
-    result = merge(runs, hint_date)
-    if result["status"] != "ok" and any(not isinstance(p, str) for p in pages):
-        if verbose:
-            print("  Tesseract не сошёлся с итогом — перепроверяю EasyOCR")
-        for page in pages:
-            if not isinstance(page, str) and (t := easyocr_text(page)):
-                texts.append("### EasyOCR\n" + t)
-                runs.append(parse_text(t))
-                runs.append(parse_text(t))  # у EasyOCR другие ошибки — даём ему двойной вес
-        result = merge(runs, hint_date)
+    tess = [t for page in pages for t in tesseract_texts(page)]
+    images = [p for p in pages if not isinstance(p, str)]
+    easy = (lambda: "\n".join(t for p in images if (t := easyocr_text(p)))) if images else None
+    result, texts = vote(tess, easy, hint_date, verbose)
     return result, "\n\n### ---\n".join(texts)
 
 

@@ -9,6 +9,7 @@
   python budget.py unknown                        неопознанные позиции
   python budget.py setcat "<шаблон>" "Еда/Сладкое"   правило категории (до веб-интерфейса)
   python budget.py bank login | sync | status | reparse   выписка PKO через Enable Banking
+  python budget.py bank import [файлы]            выписка из файла: CSV, MT940, camt.053 (без файлов — bank/inbox/)
   python budget.py backup [password | list | restore <файл>]   зашифрованные резервные копии
   python budget.py reconcile                      сверка покупок с банком (делается и после bank sync)
   python budget.py mail login | headers | senders | mark | bodies | parse   онлайн-покупки из Gmail
@@ -21,7 +22,7 @@
 """
 import sys
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 
 def main(argv: list[str]):
