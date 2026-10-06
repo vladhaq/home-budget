@@ -93,6 +93,26 @@ function donutParts(rows, pickOverride = null) {
   return {parts, total: parts.reduce((s, p) => s + p.v, 0)};
 }
 
+// «по дням» без выбранного в фильтре периода: окно в N дней (длина запоминается), стрелки сдвигают его на свою длину
+const DAY_SPANS = [[14, "2 нед.", "2 недели"], [31, "месяц", "30 дней"], [61, "2 мес.", "2 месяца"], [92, "3 мес.", "3 месяца"],
+                   [183, "полгода", "полгода"], [365, "год", "год"]];
+const DSPAN_KEY = "budget-day-span";
+S.daySpan = (() => { try { return +localStorage.getItem(DSPAN_KEY) || 61; } catch (e) { return 61; } })();
+S.dayShift = 0;  // на сколько окон назад от последней покупки
+function dayWindow(first, last) {
+  const to = addDays(last, -S.daySpan * S.dayShift), from = addDays(to, -(S.daySpan - 1));
+  const word = (DAY_SPANS.find(([d]) => d === S.daySpan) || [, , `${S.daySpan} дней`])[2];
+  const dm = d => `${d.slice(8, 10)}.${d.slice(5, 7)}.${d.slice(2, 4)}`;
+  return {from, to, window: true, older: from > first, label: S.dayShift ? `${dm(from)} – ${dm(to)}` : `последние ${word}`};
+}
+function dayWindowBar(range) {
+  return `<span class="crumbs"><div class="tabs" data-key="dspan">${DAY_SPANS.map(([d, n]) =>
+      `<button class="${S.daySpan === d ? "on" : ""}" data-dspan="${d}">${n}</button>`).join("")}</div>
+    <button class="chip" data-dshift="1" ${range.older ? "" : "disabled"} title="раньше">‹</button>
+    <b>${esc(range.label)}</b>
+    <button class="chip" data-dshift="-1" ${S.dayShift > 0 ? "" : "disabled"} title="позже">›</button></span>`;
+}
+
 function granBar(range, donutOK = false) {  // переключатель день/неделя/... и «хлебные крошки» после двойного клика
   const path = S.crumbs.map((c, i) => `<button class="linkbtn" data-crumb="${i}">${esc(c.range ? c.range.label : "всё время")}</button>`).join(" › ");
   const sides = flowSides(), flow = curFlow();
@@ -100,8 +120,8 @@ function granBar(range, donutOK = false) {  // переключатель ден
     .map(([k, n]) => `<button class="${flow === k ? "on" : ""}" data-flow="${k}">${n}</button>`).join("")}</div>` : "";
   return `<div class="ovbar"><div class="tabs" data-key="gran">${GRANS.map(([k, n]) =>
       `<button class="${S.gran === k ? "on" : ""}" data-gran="${k}">${n}</button>`).join("")}</div>${flowTabs}${ctypeTabs(donutOK)}
-    ${range ? `<span class="crumbs">${S.crumbs.length ? `<button class="chip" data-back="1">‹ назад</button> ${path} ›` : ""}
-      <b>${esc(range.label)}</b></span>` : ""}</div>`;
+    ${range && range.window ? dayWindowBar(range) : range ? `<span class="crumbs">${S.crumbs.length
+      ? `<button class="chip" data-back="1">‹ назад</button> ${path} ›` : ""}<b>${esc(range.label)}</b></span>` : ""}</div>`;
 }
 // скрытые глазом категории (с подкатегориями): уходят из графика, карточек, «товаров» и «чеков»; в дереве — зачёркнуты
 const HIDDEN_KEY = "budget-hidden-cats";
@@ -137,9 +157,10 @@ function renderOverview() {
   const g = S.gran, main = document.getElementById("main"), flow = curFlow();
   let outs = flow === "in" ? [] : filtered(), ins = flow === "out" ? [] : filteredIncome(), range = S.range;
   let ps = outs.concat(ins);
-  if (!range && g === "day" && ps.length) {  // дни за всю историю не уместятся — по умолчанию последние два месяца
-    const last = ps.reduce((m, p) => p.date > m ? p.date : m, "").slice(0, 10);
-    range = {from: addDays(last, -61), to: last, label: "последние 2 месяца"};
+  // дни за всю историю не уместятся — окно (по умолчанию 2 месяца); выбран период в фильтре — он весь
+  if (!range && g === "day" && ps.length && !S.F.from && !S.F.to) {
+    const ds = ps.map(p => p.date.slice(0, 10));
+    range = dayWindow(ds.reduce((a, b) => a < b ? a : b), ds.reduce((a, b) => a > b ? a : b));
   }
   CUR_RANGE = range;
   const inRange = p => !range || p.date.slice(0, 10) >= range.from && p.date.slice(0, 10) <= range.to;
@@ -237,29 +258,41 @@ function drawDonuts({labels, byKey, byIn, flow}) {  // кольцо: доли з
   if (!rings.length) { box.innerHTML = `<div class="empty">За этот период ничего нет.</div>`; return; }
   box.innerHTML = rings.map((r, j) => `<div class="donut">
       <div class="dwrap"><canvas id="donut${j}"></canvas>
-        <div class="dcenter"><span>${r.word}</span><b>${zl(r.total)}</b><span>${esc(when)}</span></div></div>
+        <div class="dcenter" id="dcenter${j}"></div></div>
       <div class="dlegend">${r.parts.map((p, i) => `<button type="button" class="dleg" data-dcat="${p.k ?? ""}" data-dj="${j}" data-di="${i}"
           ${p.k == null ? "disabled" : ""} title="${p.k == null ? "" : "показать только эту категорию"}"><i style="--c:${p.color}"></i>
           <span>${esc(p.name)}</span><b>${zl(p.v)}</b><em>${(p.v / (r.total || 1) * 100).toFixed(0)}%</em></button>`).join("")}</div>
     </div>`).join("");
+  // наведение на долю или строку легенды показывает её в центре кольца (всплывающей плашки нет — она
+  // перекрывала бы сумму в центре); увёл мышь — снова общая сумма
+  const center = (j, i = null) => {
+    const r = rings[j], p = i == null ? null : r.parts[i], el = document.getElementById("dcenter" + j);
+    el.classList.toggle("part", !!p);
+    el.innerHTML = p ? `<span class="dname"><i style="--c:${p.color}"></i>${esc(p.name)}</span><b>${zl(p.v)}</b>
+        <span>${(p.v / (r.total || 1) * 100).toFixed(0)}% · ${r.word}</span>`
+      : `<span>${r.word}</span><b>${zl(r.total)}</b><span>${esc(when)}</span>`;
+  };
   rings.forEach((r, j) => {
+    center(j);
     const ch = new Chart(document.getElementById("donut" + j), {
       type: "doughnut",
       data: {labels: r.parts.map(p => p.name), datasets: [{data: r.parts.map(p => +p.v.toFixed(2)), backgroundColor: r.parts.map(p => p.color),
         hoverBackgroundColor: r.parts.map(p => p.color), borderWidth: 0, borderRadius: 6, spacing: 3, hoverOffset: 8}]},
       plugins: [ARC_GLOW],
       options: {animation: chartAnim() && {animateRotate: true, duration: 800}, cutout: "70%", maintainAspectRatio: false,
-        layout: {padding: 14}, plugins: {legend: {display: false},
-          tooltip: {callbacks: {label: x => ` ${x.label}: ${zl(x.parsed)} · ${(x.parsed / (r.total || 1) * 100).toFixed(0)}%`}}},
+        layout: {padding: 14}, plugins: {legend: {display: false}, tooltip: {enabled: false}},
         onClick: (e, els) => { const p = els.length && r.parts[els[0].index]; if (p && p.k != null) pickSlice(p.k); },
-        onHover: (e, els) => { e.native.target.style.cursor = els.length && r.parts[els[0].index].k != null ? "pointer" : "default"; }},
+        onHover: (e, els) => {
+          e.native.target.style.cursor = els.length && r.parts[els[0].index].k != null ? "pointer" : "default";
+          center(j, els.length ? els[0].index : null);
+        }},
     });
     DONUTS.push(ch);
   });
-  for (const b of box.querySelectorAll(".dleg")) {  // наведение на строку легенды подсвечивает долю
-    const ch = DONUTS[+b.dataset.dj], el = [{datasetIndex: 0, index: +b.dataset.di}];
-    b.addEventListener("mouseenter", () => { ch.setActiveElements(el); ch.tooltip.setActiveElements(el, {x: 0, y: 0}); ch.update(); });
-    b.addEventListener("mouseleave", () => { ch.setActiveElements([]); ch.tooltip.setActiveElements([], {x: 0, y: 0}); ch.update(); });
+  for (const b of box.querySelectorAll(".dleg")) {  // наведение на строку легенды выдвигает долю и показывает её в центре
+    const j = +b.dataset.dj, i = +b.dataset.di, ch = DONUTS[j];
+    b.addEventListener("mouseenter", () => { ch.setActiveElements([{datasetIndex: 0, index: i}]); ch.update(); center(j, i); });
+    b.addEventListener("mouseleave", () => { ch.setActiveElements([]); ch.update(); center(j); });
   }
 }
 function pickSlice(k) {  // клик по доле — фильтр по этой категории (у неё самой кольцо покажет подкатегории)
@@ -298,6 +331,25 @@ function renderPanel({labels, byKey, byIn, spent, saved, recv, flow}) {
   const topDay = Object.entries(byDay).sort((a, b) => b[1] - a[1])[0];
   const topBuy = rs.slice().sort((a, b) => b.value - a.value)[0];
   const first = rs.length ? rs[0].date.slice(0, 7) : null, last = rs.length ? rs[rs.length - 1].date.slice(0, 7) : null;
+  // «в среднем за месяц» — делим на длину показанного периода в днях: неполный текущий месяц (или неделя
+  // данных в первом) не занижает среднее, как было бы при делении на число месяцев
+  const today = isoDay(new Date());
+  const spanFrom = CUR_RANGE ? CUR_RANGE.from : pspan(labels[0], g)[0];
+  const spanTo = CUR_RANGE ? CUR_RANGE.to : [pspan(labels[labels.length - 1], g)[1], today].sort()[0];
+  const months = ((new Date(spanTo) - new Date(spanFrom)) / 864e5 + 1) / 30.44;
+  // карточка видна и при выбранном месяце (так открывается «Обзор»): среднее — по всему показанному периоду,
+  // а у завершённого месяца — насколько он выше или ниже среднего
+  const avgCard = months < 1.5 ? "" : (() => {
+    const whole = arr => arr.reduce((a, b) => a + b, 0);
+    const avgOut = whole(spent) / months, avgIn = whole(recv) / months, inc = flow === "in";
+    const per = g === "day" || g === "week" ? `<br>${PER_WORD[g]} ${zl(whole(inc ? recv : spent) / labels.length)}` : "";
+    const span = `за ${months.toLocaleString("ru-RU", {maximumFractionDigits: 1})} мес.`;
+    const d = !all && g === "month" && pspan(S.period, g)[1] < today && (inc ? avgIn : avgOut)
+      ? ((inc ? got : total) / (inc ? avgIn : avgOut) - 1) * 100 : null;
+    const vs = d === null ? "" : `<br><span class="${(d > 0) === inc ? "down" : "up"}">этот месяц ${d > 0 ? "+" : ""}${d.toFixed(0)}% к среднему</span>`;
+    return inc ? `<div class="card">в среднем за месяц<b class="save">${zl(avgIn)}</b>${span}${per}${vs}</div>`
+      : `<div class="card">в среднем за месяц<b>${zl(avgOut)}</b>${flow === "both" ? `поступает ${zl(avgIn)}` : span}${per}${vs}</div>`;
+  })();
   const title = !all ? pname(S.period, g) : CUR_RANGE ? esc(CUR_RANGE.label)
     : `всё время <span class="muted">(${first ? monthName(first) : ""} – ${last ? monthName(last) : ""})</span>`;
   const dayCard = g === "day" && !all
@@ -308,12 +360,13 @@ function renderPanel({labels, byKey, byIn, spent, saved, recv, flow}) {
       <h2>${title}</h2>
       <button ${!all && i < labels.length - 1 ? "" : "disabled"} data-period="${labels[i + 1]}" title="следующий период">›</button>
       <button class="chip ${all ? "on" : ""}" data-period="all" style="margin-left:auto">${CUR_RANGE ? "весь период" : "всё время"}</button></div>
-    <div class="cards">${flow === "in" ? incomeCards(ins, got, diffIn, labels, all, pct)
+    <div class="cards">${flow === "in" ? incomeCards(ins, got, diffIn, labels, all, pct) + avgCard
       : `${flow === "both" ? `<div class="card">поступило<b class="save">${zl(got)}</b>${pct(diffIn, true)}</div>` : ""}
       <div class="card">потрачено<b>${zl(total)}</b>${pct(diff, false)}</div>
       ${flow === "both" ? `<div class="card">разница<b class="${got - total >= 0 ? "save" : "up"}">${got - total >= 0 ? "+" : "−"}${zl(Math.abs(got - total))}</b>поступило минус потрачено</div>` : ""}
+      ${avgCard}
       <div class="card">сэкономлено<b class="save">${zl(disc)}</b>${(disc / (total + disc) * 100 || 0).toFixed(0)}% от цены без скидок</div>
-      <div class="card">покупок<b>${rs.length}</b>${rs.length ? `средняя ${zl(total / rs.length)}` : ""}${all ? `<br>${PER_WORD[g]} ${zl(total / labels.length)}` : ""}</div>
+      <div class="card">покупок<b>${rs.length}</b>${rs.length ? `средняя ${zl(total / rs.length)}` : ""}</div>
       ${flow === "out" ? `<div class="card">позиций<b>${nItems}</b>разных товаров: ${items.length}</div>${dayCard}` : ""}`}
     </div>
     <div class="tabs" data-key="view">${[["cats", "категории"], ["items", flow === "in" ? "поступления" : "товары"], ["receipts", flow === "in" ? "по отправителям" : "чеки"]].map(([k, n]) =>
@@ -460,7 +513,7 @@ function incomeCards(ins, got, diffIn, labels, all, pct) {
   const by = {}; for (const r of ins) by[r.merchant] = (by[r.merchant] || 0) + r.value;
   const top = Object.entries(by).sort((a, b) => b[1] - a[1])[0];
   return `<div class="card">поступило<b class="save">${zl(got)}</b>${pct(diffIn, true)}</div>
-    <div class="card">поступлений<b>${ins.length}</b>${ins.length ? `среднее ${zl(got / ins.length)}` : ""}${all ? `<br>${PER_WORD[S.gran]} ${zl(got / labels.length)}` : ""}</div>
+    <div class="card">поступлений<b>${ins.length}</b>${ins.length ? `среднее ${zl(got / ins.length)}` : ""}</div>
     <div class="card">больше всего<b>${top ? zl(top[1]) : "—"}</b>${top ? esc(top[0]) : ""}</div>`;
 }
 // поступления списком: дата, от кого, описание, категория (правка — как у операций на вкладке «Банк»), сумма
@@ -506,7 +559,8 @@ function catTree(rs, title, word) {  // категория -> подкатего
   }
   CATS_BRANCHES.push(...Object.keys(T).filter(k => T[k].kids.size));
   const name = k => k === "none" ? "⚠ Неопознанные" : CAT[k] ? CAT[k].name : "?";
-  const bar = v => `<div class="bar" style="width:${(v / (all || 1) * 100).toFixed(1)}%"></div>`;
+  // доля отрицательной суммы (одни возвраты) — без полоски: отрицательная ширина в CSS не работает и рисует полную
+  const bar = v => `<div class="bar" style="width:${Math.max(0, v / (all || 1) * 100).toFixed(1)}%"></div>`;
   const bySpent = (a, b) => T[b].full - T[a].full;
   const rows = (k, depth, fresh) => {
     const n = T[k], open = S.openCats.has(k), kids = [...n.kids].sort(bySpent);
@@ -518,7 +572,7 @@ function catTree(rs, title, word) {  // категория -> подкатего
           : hid ? "скрыта вместе с родительской категорией" : "убрать из графика и сводки"}"${hid && !self ? " disabled" : ""}>${self ? ICON.eyeOff : ICON.eye}</button><button
           class="cellbtn ctog" data-cattog="${k}" title="${open ? "свернуть" : "развернуть"}"><span class="chev${open ? " on" : ""}"></span>${label}</button>
         ${kids.length ? "" : `<span class="src">${n.items.length} поз.</span>`}</td>
-      <td class="n">${depth ? zl(v) : `<b>${zl(v)}</b>`}</td><td class="n">${hid ? "—" : (v / (all || 1) * 100).toFixed(0) + "%"}</td>
+      <td class="n">${depth ? zl(v) : `<b>${zl(v)}</b>`}</td><td class="n">${hid || v < 0 ? "—" : (v / (all || 1) * 100).toFixed(0) + "%"}</td>
       <td>${hid ? "" : bar(v)}</td></tr>`;
     if (!open) return h;
     const fr = S.justOpenedCat === k;

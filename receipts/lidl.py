@@ -12,6 +12,7 @@ import requests
 
 from core.common import DATA, money, num
 from core.db import connect, save_purchase
+from core.logins import alive, jwt_claims, record
 
 LIDL = DATA / "lidl"
 RAW = LIDL / "raw"
@@ -89,6 +90,7 @@ def login():
     global _access
     _access = token_request({"grant_type": "authorization_code", "code": code,
                              "redirect_uri": REDIRECT, "code_verifier": verifier})
+    record("lidl")
     print("Вход выполнен, токен сохранён в", TOKEN)
     print("ВАЖНО: token.json — это доступ к твоему аккаунту Lidl Plus, никому не отдавай.")
     tickets = list_tickets()
@@ -105,12 +107,21 @@ def token_request(payload: dict) -> str:
             break
         time.sleep(5)  # свежий токен иногда ещё не разошёлся по серверам Lidl
     if r.status_code != 200:
+        if payload["grant_type"] == "refresh_token" and r.status_code in (400, 401):
+            record("lidl", "expired")  # для «среднего срока жизни токена» на странице «Настройки»
         raise SystemExit(f"Lidl не выдал токен ({r.status_code}): {r.text[:300]}\n"
                          f"Если вход устарел — python budget.py lidl login")
     tok = r.json()
     LIDL.mkdir(parents=True, exist_ok=True)
+    # дата входа: из токена, иначе из прошлого файла (обновление токена вход не меняет)
+    auth = jwt_claims(tok["access_token"]).get("auth_time")
+    if payload["grant_type"] == "refresh_token":
+        alive("lidl")
+        auth = auth or json.loads(TOKEN.read_text(encoding="utf-8")).get("auth_time")
+    elif not auth:
+        auth = int(time.time())
     # refresh-токен одноразовый: каждый раз сохраняем новый
-    TOKEN.write_text(json.dumps({"refresh_token": tok["refresh_token"]}), encoding="utf-8")
+    TOKEN.write_text(json.dumps({"refresh_token": tok["refresh_token"], "auth_time": auth}), encoding="utf-8")
     return tok["access_token"]
 
 

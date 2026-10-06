@@ -40,6 +40,7 @@ class Tx:
     type: str | None = None       # код как у PKO: CARD-PAYMENT, TRANSFER-IN…
     balance: float | None = None  # остаток после операции
     raw: dict = field(default_factory=dict)
+    ref: str | None = None        # номер операции в банке (у BLIK в PKO он же — описание операции из банка)
 
 
 @dataclass
@@ -98,10 +99,13 @@ def date_of(s) -> str | None:
 # по описанию (не по колонке типа) они срабатывают только в начале текста — «Opłata za czynsz» в назначении перевода
 # не комиссия банка
 TYPE_RULES = [
-    (r"zwrot.{0,30}kod\w* mobiln|zwrot.{0,15}blik", "MOBILE-PAYMENT-POS-RETURN", "MOBILE-PAYMENT-POS-RETURN"),
+    (r"zwrot.{0,30}kod\w* mobiln|zwrot.{0,15}blik|zwrot w terminalu", "MOBILE-PAYMENT-POS-RETURN", "MOBILE-PAYMENT-POS-RETURN"),
     (r"zwrot.{0,30}kart|card refund|refund.{0,20}card|karten.{0,10}gutschrift", "CARD-PAYMENT-RETURN", "CARD-PAYMENT-RETURN"),
-    (r"wplatomat|wplata gotowk|wplata w kasie|wplata wlasna|cash deposit|bareinzahlung|einzahlung", "CASH-IN", "CASH-IN"),
+    (r"wplata blik\w*.{0,20}wplatomac", "CASH-IN-ATM-TX-CODE", "CASH-IN-ATM-TX-CODE"),
+    (r"wplatomac", "CASH-IN-ATM", "CASH-IN-ATM"),
+    (r"wplata gotowk|wplata w kasie|wplata wlasna|cash deposit|bareinzahlung|einzahlung", "CASH-IN", "CASH-IN"),
     (r"bankomat|\batm\b|cash withdrawal|wyplata gotowk|geldautomat|bargeldbehebung|\bbehebung", "CARD-ATM", "CASH-IN-ATM"),
+    (r"przelew na telefon.{0,30}\bzew", "MOBILE-PAYMENT-C2C-EXTERNAL", "MOBILE-PAYMENT-C2C-EXTERNAL"),
     (r"przelew na telefon|blik.{0,20}(telefon|p2p|transfer to mobile)|na numer telefonu", "MOBILE-PAYMENT-C2C",
      "MOBILE-PAYMENT-C2C"),
     (r"(platnosc|zakup).{0,20}(web|internet).{0,20}(kod\w* mobiln|blik)|kod\w* mobiln.{0,20}(web|internet)"
@@ -114,7 +118,7 @@ TYPE_RULES = [
      "CARD-PAYMENT", "CARD-PAYMENT-RETURN"),
     (r"urzad skarbow|przelew podatkow|mikrorachun|\bzus\b", "US-TRANSFER", "TRANSFER-IN"),
     (r"express elixir|przelew natychmiast", "TRANSFER-EXPRESS-ELIXIR", "TRANSFER-EXPRESS-ELIXIR-IN"),
-    (r"odsetk|kapitalizac|interest|zinsen|habenzins", "INTEREST", "INTEREST"),
+    (r"odset|kapitalizac|interest|zinsen|habenzins", "INTEREST", "INTEREST"),
     (r"\boplata\b|prowizj|\bfee\b|gebuhr|entgelt|kontofuhrung|commission", "FEE", "FEE"),
 ]
 
@@ -219,7 +223,8 @@ def parse_camt(data: bytes) -> Statement | None:
             if kind in (None, "TRANSFER", "TRANSFER-IN"):  # по коду только «перевод» — уточняем по тексту (BLIK, налог…)
                 kind = kind_of(f"{prtry} {_text(n, 'AddtlNtryInf') or ''}", desc, amt)
             out.append(Tx(day, amt, desc, clean(who) or None, kind,
-                          raw={"code": code or prtry, "ref": _text(n, "AcctSvcrRef"), "value_date": _text(n, "ValDt/Dt")}))
+                          raw={"code": code or prtry, "ref": _text(n, "AcctSvcrRef"), "value_date": _text(n, "ValDt/Dt")},
+                          ref=_text(n, "AcctSvcrRef")))
         if opening is not None:  # остаток после каждой операции — от начального, если сходится с конечным
             bal = opening
             for t in out:
@@ -467,8 +472,9 @@ def parse_csv(text: str) -> Statement | None:
         else:
             desc = clean(" ".join([get("desc"), *extra]))
         kind = kind_of(get("type"), f"{get('desc')} {' '.join(extra)}", amt)
+        ref = kv.get("numer referencyjny") or (title if title and re.fullmatch(r"\d{10,}", title.strip()) else None)
         out.append(Tx(day, round(amt, 2), desc, clean(who) or None, kind, amount_of(get("balance")),
-                      raw={"row": r, "type_text": get("type") or None}))
+                      raw={"row": r, "type_text": get("type") or None, "place": clean(place) or None}, ref=ref))
     if not out:
         return None
     ccy = next((r[roles["currency"]] for r in body if "currency" in roles and roles["currency"] < len(r) and r[roles["currency"]]), None)
@@ -527,23 +533,59 @@ def account_prefix(con, iban: str | None) -> tuple[str, str, bool]:
     return "f" + hashlib.sha1(key.encode()).hexdigest()[:7], f"счёт …{acc[-4:]}" if acc else "счёт из файла", False
 
 
-def fresh(existing: list[tuple[str, float]], rows: list[Tx]) -> tuple[list[Tx], int]:
-    """Операции, которых ещё нет: та же сумма ±DUP_DAYS дней — уже есть (каждая имеющаяся — только для одной
-    строки файла, ближайшей по дате). -> (новые, повторов)"""
-    pool = {}
-    for d, a in existing:
-        pool.setdefault(round(a, 2), []).append(dt.date.fromisoformat(d))
-    new, dup = [], 0
+def _digits(s) -> str:
+    d = re.sub(r"\D", "", s or "")
+    return d.lstrip("0") if len(d) >= 10 else ""
+
+
+def fresh(existing: list[dict], rows: list[Tx]) -> tuple[list[Tx], list[tuple[dict, Tx]]]:
+    """Какие операции файла новые. Уже есть: тот же номер операции (у BLIK из PKO описание — это номер) или та же
+    сумма ±DUP_DAYS дней; каждая имеющаяся — только для одной строки файла, ближайшей по дате.
+    existing — [{id, date, amount, description}]. -> (новые, пары «имеющаяся — строка файла»)"""
+    left = list(existing)
+    by_ref = {_digits(e["description"]): e for e in left if _digits(e["description"]) and
+              not re.search(r"[A-Za-z]", e["description"] or "")}
+    pairs, rest = [], []
     for t in rows:
-        cand = pool.get(round(t.amount, 2), [])
-        day = dt.date.fromisoformat(t.date)
-        near = sorted((abs((d - day).days), i) for i, d in enumerate(cand) if abs((d - day).days) <= DUP_DAYS)
+        e = by_ref.get(_digits(t.ref))
+        if e is not None and abs(e["amount"] - t.amount) < 0.005 and e in left:
+            left.remove(e)
+            pairs.append((e, t))
+        else:
+            rest.append(t)
+    pool = {}
+    for e in left:
+        pool.setdefault(round(e["amount"], 2), []).append(e)
+    new = []
+    for t in rest:
+        cand, day = pool.get(round(t.amount, 2), []), dt.date.fromisoformat(t.date)
+        near = sorted((abs((dt.date.fromisoformat(e["date"]) - day).days), i) for i, e in enumerate(cand)
+                      if abs((dt.date.fromisoformat(e["date"]) - day).days) <= DUP_DAYS)
         if near:
-            cand.pop(near[0][1])
-            dup += 1
+            pairs.append((cand.pop(near[0][1]), t))
         else:
             new.append(t)
-    return new, dup
+    return new, pairs
+
+
+def enrich(con, pairs: list[tuple[dict, Tx]], file: str) -> int:
+    """Операции из банка, у которых в описании только номер (BLIK из PKO: ни магазина, ни адреса), получают
+    подробности из файла — адрес («http://www.example.nl/»), получателя. Хранятся в ответе банка под «_file»:
+    пересборка выписки (bank reparse) их сохраняет. -> сколько дополнено"""
+    from bank.enablebanking import parse_tx
+    n = 0
+    for e, t in pairs:
+        if ":F" in e["id"] or re.search(r"[A-Za-zА-Яа-я]", e["description"] or ""):
+            continue  # из файла или в описании уже есть текст (магазин, город, назначение)
+        add = {"desc": t.raw.get("place"), "who": t.counterparty, "file": file}
+        if not add["desc"] and not add["who"]:
+            continue
+        raw = json.loads(con.execute("SELECT raw FROM bank_tx WHERE id = ?", (e["id"],)).fetchone()[0])
+        raw["_file"] = add
+        p = parse_tx(raw, e["id"].split(":")[0])
+        con.execute("UPDATE bank_tx SET counterparty = ?, description = ?, raw = ? WHERE id = ?", (p[5], p[6], p[7], e["id"]))
+        n += 1
+    return n
 
 
 def import_file(path: Path, con=None) -> dict:
@@ -551,8 +593,9 @@ def import_file(path: Path, con=None) -> dict:
     con = con or connect()
     st = parse(path)
     prefix, label, linked = account_prefix(con, st.iban)
-    existing = [(r["date"], r["amount"]) for r in con.execute("SELECT date, amount FROM bank_tx WHERE id LIKE ?", (prefix + ":%",))]
-    new, dup = fresh(existing, st.rows)
+    existing = [dict(r) for r in con.execute("SELECT id, date, amount, description FROM bank_tx WHERE id LIKE ?", (prefix + ":%",))]
+    new, pairs = fresh(existing, st.rows)
+    dup, enriched = len(pairs), enrich(con, pairs, path.name)
     order = {id(t): i for i, t in enumerate(st.rows)}  # номер после «;» — порядок внутри дня для остатка на конец дня
     seen_keys = {}
     rows = []
@@ -575,12 +618,12 @@ def import_file(path: Path, con=None) -> dict:
                 set_meta(con, f"bank_balance:{prefix}", json.dumps({"amount": with_bal[-1].balance, "date": with_bal[-1].date}))
     con.commit()
     return {"file": path.name, "format": st.format, "account": label, "rows": len(st.rows), "new": len(rows), "dup": dup,
-            "from": st.rows[0].date, "to": st.rows[-1].date}
+            "enriched": enriched, "from": st.rows[0].date, "to": st.rows[-1].date}
 
 
 def report(r: dict) -> str:
     return (f"{r['file']}: {r['format']}, {r['account']}, {r['from']} — {r['to']}: операций {r['rows']}, "
-            f"новых {r['new']}, уже были {r['dup']}")
+            f"новых {r['new']}, уже были {r['dup']}" + (f", дополнено подробностями {r['enriched']}" if r.get("enriched") else ""))
 
 
 def import_inbox(verbose=True) -> list[dict]:
@@ -613,7 +656,7 @@ def main(argv: list[str]):
         return
     for r in results:
         print("✗ " + r["error"] if "error" in r else report(r))
-    if any(r.get("new") for r in results):
+    if any(r.get("new") or r.get("enriched") for r in results):
         from core import reconcile
         reconcile.match(verbose=False)
         print("Сверка с чеками обновлена.")

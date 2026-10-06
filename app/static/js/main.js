@@ -81,7 +81,9 @@ function toast(msg, o = {}) {  // o.action + o.onAction — кнопка «Ве�
 
 async function post(url, body) {
   const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-  const j = await r.json();
+  const j = await r.json().catch(() => null);
+  if (!j) throw new Error(r.status === 404 ? "сервер работает на старой версии — перезапусти: python budget.py serve"
+                                           : `сервер ответил ${r.status} ${r.statusText}`);
   if (!r.ok || !j.ok) throw new Error(j.error || r.statusText);
   return j;
 }
@@ -195,6 +197,9 @@ document.addEventListener("click", async e => {
   }
   if (t.dataset.updrun !== undefined) { await startUpdate(t.dataset.updrun ? [t.dataset.updrun] : []); return; }
   if (t.dataset.sched) { await setSchedule(t.dataset.sched === "on"); return; }
+  if (t.dataset.login) { await startLogin(t.dataset.login); return; }
+  if (t.dataset.upcheck !== undefined) { await checkUpgrade(); return; }
+  if (t.dataset.upinstall !== undefined) { await installUpgrade(); return; }
   if (t.dataset.monthOpen) {
     S.page = "overview"; S.gran = "month"; S.range = null; S.crumbs = []; S.period = t.dataset.monthOpen; render(); scrollTo(0, 0); return;
   }
@@ -215,7 +220,13 @@ document.addEventListener("click", async e => {
     const k = t.dataset.bopen; S.bankOpen.has(k) ? S.bankOpen.delete(k) : S.bankOpen.add(k);
     S.bankJust = S.bankOpen.has(k) ? k : null; drawBankList(); S.bankJust = null; return;
   }
-  if (t.dataset.gran) { S.gran = t.dataset.gran; S.range = null; S.crumbs = []; S.period = null; CHART_ANIM = true; renderOverview();
+  if (t.dataset.dspan) {  // «по дням»: длина окна
+    S.daySpan = +t.dataset.dspan; S.dayShift = 0; S.period = "all";
+    try { localStorage.setItem(DSPAN_KEY, S.daySpan); } catch (err) { /* только до перезагрузки */ }
+    CHART_ANIM = true; renderOverview(); return;
+  }
+  if (t.dataset.dshift) { S.dayShift = Math.max(0, S.dayShift + +t.dataset.dshift); S.period = "all"; CHART_ANIM = true; renderOverview(); return; }
+  if (t.dataset.gran) { S.gran = t.dataset.gran; S.range = null; S.crumbs = []; S.period = null; S.dayShift = 0; CHART_ANIM = true; renderOverview();
                         animateEnter(document.getElementById("main")); return; }
   if (t.dataset.back) { backTo(S.crumbs.length - 1); return; }
   if (t.dataset.crumb !== undefined) { backTo(+t.dataset.crumb); return; }

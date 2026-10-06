@@ -19,6 +19,7 @@ import requests
 from core.browser_login import wait_for_redirect
 from core.common import DATA, money
 from core.db import connect, get_meta, set_meta
+from core.logins import alive, local, record
 
 BANK = DATA / "bank"
 SESSION = BANK / "session.json"
@@ -62,6 +63,8 @@ def call(method: str, path: str, **kw):
             continue
         break
     if r.status_code >= 400:
+        if r.status_code in (401, 403) and path.startswith("/accounts/"):
+            record("bank", "expired")  # банк отозвал согласие раньше срока
         raise SystemExit(f"Enable Banking {method} {path}: {r.status_code} {r.text[:400]}")
     return r.json()
 
@@ -98,8 +101,10 @@ def login():
     session = call("POST", "/sessions", json={"code": q["code"][0]})
     BANK.mkdir(parents=True, exist_ok=True)
     SESSION.write_text(json.dumps({"session_id": session["session_id"], "valid_until": valid_until,
-                                   "accounts": session.get("accounts", []), "aspsp": aspsp["name"]},
+                                   "accounts": session.get("accounts", []), "aspsp": aspsp["name"],
+                                   "created": dt.datetime.now().isoformat(timespec="seconds")},
                                   ensure_ascii=False, indent=1), encoding="utf-8")
+    record("bank")
     print(f"Доступ получен до {valid_until[:10]}. Счетов: {len(session.get('accounts', []))}.")
     print("Дальше: python budget.py bank sync")
 
@@ -110,11 +115,35 @@ def session() -> dict:
     except FileNotFoundError:
         raise SystemExit("Сначала: python budget.py bank login")
     if s["valid_until"] < dt.datetime.now(dt.timezone.utc).isoformat():
+        record("bank", "expired", local(dt.datetime.fromisoformat(s["valid_until"]).timestamp()))
         raise SystemExit("Согласие банка истекло — продли: python budget.py bank login")
     return s
 
 
-# ---------------------------------------------------------------- операции
+# ---------------------------------------------------------------- остаток и операции
+
+AVAILABLE = ("ITAV", "CLAV", "XPCD", "OPAV")  # доступный: за вычетом заблокированных покупок по карте
+BOOKED = ("ITBD", "CLBD", "OPBD", "PRCD")      # учтённый: только проведённые операции (как в выписке)
+
+
+def balance(balances: list[dict]) -> dict | None:
+    """{"amount": доступно, "booked": по выписке, "blocked": заблокировано}. PKO отдаёт оба остатка (ITBD и ITAV),
+    а заблокированные операции через API не отдаёт — видна только их сумма: разница остатков.
+    Доступный больше учтённого — банк прибавил кредитный лимит; блокировки тогда не узнать, берём учтённый."""
+    by = {b.get("balance_type"): float(b["balance_amount"]["amount"]) for b in balances}
+    if not by:
+        return None
+    booked = next((by[t] for t in BOOKED if t in by), None)
+    avail = next((by[t] for t in AVAILABLE if t in by), None)
+    if booked is None:
+        booked = avail if avail is not None else next(iter(by.values()))
+    amount = avail if avail is not None and avail <= booked else booked
+    return {"amount": amount, "booked": booked, "blocked": round(booked - amount, 2)}
+
+
+def save_balance(con, uid: str):
+    if b := balance(call("GET", f"/accounts/{uid}/balances").get("balances", [])):
+        set_meta(con, f"bank_balance:{uid}", json.dumps(b | {"date": dt.date.today().isoformat()}))
 
 def tx_id(t: dict, account: str) -> str:
     ref = t.get("entry_reference") or t.get("transaction_id")
@@ -137,6 +166,9 @@ def parse_tx(t: dict, account: str) -> tuple:
     kind = info[-1] if info and re.fullmatch(r"[A-Z0-9-]+", info[-1]) else \
         (t.get("bank_transaction_code") or {}).get("description")
     desc = " ".join(info[:-1] if kind and info and info[-1] == kind else info)
+    if f := t.get("_file"):  # подробности из выписки-файла (адрес магазина у BLIK) — банк через API их не даёт
+        desc = " ".join(filter(None, [desc, f.get("desc")]))
+        other = other or {"name": f.get("who")}
     bal_obj = t.get("balance_after_transaction") or {}
     bal = bal_obj.get("amount", (bal_obj.get("balance_amount") or {}).get("amount"))
     return (tx_id(t, account), t.get("booking_date") or t.get("value_date") or t.get("transaction_date"), amount,
@@ -178,11 +210,7 @@ def sync():
             if not data.get("continuation_key"):
                 break
             params = {"date_from": date_from, "continuation_key": data["continuation_key"]}
-        bal = call("GET", f"/accounts/{uid}/balances").get("balances", [])
-        if bal:
-            b = bal[0]
-            set_meta(con, f"bank_balance:{uid}", json.dumps({"amount": b["balance_amount"]["amount"],
-                                                              "date": b.get("reference_date") or dt.date.today().isoformat()}))
+        save_balance(con, uid)
         last = con.execute("SELECT max(date) FROM bank_tx WHERE id LIKE ?", (uid[:8] + ":%",)).fetchone()[0]
         if last:
             # следующая загрузка — с запасом в 5 дней: банк может дописать операции задним числом
@@ -190,6 +218,7 @@ def sync():
         total_new += n
         print(f"Счёт {(acc.get('account_id') or {}).get('iban', uid) if isinstance(acc, dict) else uid}: "
               f"новых операций {n}, последняя {last}")
+    alive("bank")
     last_all = con.execute("SELECT max(date) FROM bank_tx").fetchone()[0]
     set_meta(con, "bank_last_date", last_all)
     syncs = json.loads(get_meta(con, "bank_syncs") or "[]")[-199:] + [seen]  # нужны кошельку: окно, когда появилась операция
@@ -208,7 +237,8 @@ def status():
         uid = acc["uid"] if isinstance(acc, dict) else acc
         if b := get_meta(con, f"bank_balance:{uid}"):
             b = json.loads(b)
-            print(f"Остаток: {money(float(b['amount']))} на {b['date']}")
+            print(f"Доступно: {money(float(b['amount']))} на {b['date']}" +
+                  (f" (по выписке {money(b['booked'])}, заблокировано {money(b['blocked'])})" if b.get("blocked") else ""))
 
 
 def main(argv: list[str]):

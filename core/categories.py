@@ -32,7 +32,7 @@ TREE = [
         ("goods.clothes", "Одежда и обувь"), ("goods.electronics", "Электроника"), ("goods.appliances", "Бытовая техника")]),
     ("transport", "Транспорт", "expense", [
         ("transport.city", "Городской транспорт"), ("transport.intercity", "Поезда и междугородние"),
-        ("transport.taxi", "Такси"), ("transport.fuel", "Топливо")]),
+        ("transport.taxi", "Такси"), ("transport.fuel", "Топливо"), ("transport.bike", "Велосипед и самокат")]),
     ("housing", "Жильё", "expense", [("housing.rent", "Аренда"), ("housing.utilities", "Коммунальные")]),
     ("comms", "Связь и подписки", "expense", [("comms.mobile", "Связь и интернет"), ("comms.subscriptions", "Подписки")]),
     ("leisure", "Досуг", "expense", [
@@ -114,7 +114,7 @@ KEYWORDS = [
     ("home.furniture", r"biurko|\bmeble\b|polka|wieszak|suszarka (wiszac|do naczyn)|ociekacz|lina jutow"),
     ("home.chem", r"rekawice nitryl"),
     ("health.hygiene", r"opaska do wlosow|opaska do wlos"),
-    ("transport", r"uchwyt rowerow|na telefon skuter"),
+    ("transport.bike", r"rower|hamulc|hulajnog|uchwyt rowerow|na telefon skuter|kask (rowerow|na hulajnog)"),
     ("home.repair", r"przedluz|listwa zasil|zarowk|\bled\b|wkretak|srubokret|\bwkret|\bwkr\b|ostrza|mlotek"
                     r"|tasma (izol|klej|pakow|mier)|klej\b"),
     ("home.furniture", r"podgrzewacz|poduszk|koc\b|zaslon|firan|ramk|swiec|wazon|doniczk|dywan|posciel|recznik kapiel"
@@ -127,7 +127,7 @@ KEYWORDS = [
                             r"|dezodor|mydlo|balsam|odzywk|krem do|krem na|krem nawil|tusz do rz|pomadk|lakier do paz|chusteczk|wacik"
                             r"|patyczk|podpask|tampon|pieluch|nivea|dove\b|colgate|oral-b"),
     ("goods.clothes", r"skarpet|koszul|spodni|bluz|kurtk|czapk|rekawicz|majtk|biustonosz|buty|klapk|legginsy|t-shirt"
-                      r"|szort|shorts|spodenk|jeans"),
+                      r"|szort|shorts?\b|spodenk|jeans|denim|hoody|hoodie|sweatshirt"),
     ("goods.electronics", r"sluchawk|glosnik|mysz\b|klawiatur|pendrive|powerbank|etui na tel"),
     ("health.vitamins", r"multiwit|witamin|magnez|elektrolit|tabl\.|whey|protein\b|kreatyn"),
     ("health.pharmacy", r"strepsils|ibuprom|\bapap\b|rutinoscorbin|na kaszel|na gardlo|plaster(?! miod)"),
@@ -363,6 +363,7 @@ NOTE_KEYWORDS = [
     ("transport.intercity", r"электричк|поезд|билет на (поезд|автобус)|междугород|koleo|pkp|intercity|flixbus"),
     ("transport.city", r"автобус|трамва|проезд|метро|проездн|jakdojade|mpk|самокат"),
     ("transport.fuel", r"бензин|топлив|заправк|дизел|\bгаз\b для машин"),
+    ("transport.bike", r"велосипед|велик|тормозн\w* колодк"),
     ("health.pharmacy", r"аптек|лекарств|таблетк|сироп|капли|пластыр|бинт|обезбол|от боли|ибупро|парацетам|нурофен"
                         r"|рецепт"),
     ("health.vitamins", r"витамин|добавк|магний|омега|протеин"),
@@ -533,6 +534,10 @@ def categorize(con) -> dict:
             cat, src = K[k], "merchant"
         elif (k := keyword_category(it["name"])) and k in K:
             cat, src = K[k], "keyword"
+            # в аптеке «съедобные» слова словаря — лекарства: сироп, чай, леденцы от горла — «Аптека», а не «Напитки»
+            fb = MERCHANT_FALLBACK.get(it["merchant"]) or ""
+            if fb.startswith("health.") and k.startswith("food.") and fb in K:
+                cat, src = K[fb], "merchant"
         if cat is None:
             pending.append(it)  # попробуем товарную группу и отдел магазина — после первого прохода
             continue

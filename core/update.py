@@ -8,7 +8,8 @@
 
 Журнал запусков хранится в базе (update_runs, update_steps) и виден в интерфейсе на странице «Настройки».
 Входы (lidl/kaufland/bank login, первый вход в Telegram, пароль почты) здесь не запрашиваются: если вход
-устарел, шаг завершается ошибкой с подсказкой, какую команду запустить.
+устарел, шаг завершается ошибкой с подсказкой, какую команду запустить. Вход в Lidl, Kaufland и банк есть и в
+интерфейсе — кнопка «обновить токен» на странице «Настройки» (core/logins.py: дата входа, средний срок жизни).
 
 config.ini (необязательно):
   [update]
@@ -463,7 +464,7 @@ def sources(con) -> list[dict]:
     """Каждый источник: подключён ли, когда последний раз обновлялся успешно, по какую дату данные, что сломалось."""
     import keyring
     from bank import enablebanking
-    from core import backup
+    from core import backup, logins
     from receipts import kaufland, lidl, photos
 
     def last(step, ok_only=False):
@@ -492,9 +493,8 @@ def sources(con) -> list[dict]:
                      f"чеков с фото: {n_purchases(con, 'photo')}"),
         "photos": (True, None, None, f"файлов ждут распознавания: {len(inbox)}" if inbox else "папка пуста"),
         "bank": (enablebanking.SESSION.exists() and (days is None or days >= 0), "python budget.py bank login",
-                 con.execute("SELECT max(date) FROM bank_tx").fetchone()[0],
-                 (f"доступ до {(dt.date.today() + dt.timedelta(days=days)).isoformat()}" if days is not None and days >= 0
-                  else "доступ истёк" if days is not None else "")),
+                 con.execute("SELECT max(date) FROM bank_tx").fetchone()[0],  # срок доступа — в строке токена
+                 f"операций: {count(con, 'SELECT count(*) FROM bank_tx')}" + ("; доступ истёк" if days is not None and days < 0 else "")),
         "reconcile": (True, None, None,
                       f"неопознанных позиций: {count(con, 'SELECT count(DISTINCT lower(name)) FROM items WHERE category_id IS NULL')}"),
         "deals": deals_source(),
@@ -513,6 +513,7 @@ def sources(con) -> list[dict]:
                    "bank": "доступ истёк" if enablebanking.SESSION.exists() else "не подключено"}.get(key, "не подключено")
         out.append({"key": key, "title": title, "ready": ready, "setup": setup, "data": data_date, "note": note,
                     "warn": warn, "missing": missing, "always": key in ("photos", "reconcile"),
+                    "token": logins.state(con, key) if key in logins.SOURCES else None,
                     "last": last(key), "last_ok": last(key, ok_only=True)})
     return out
 

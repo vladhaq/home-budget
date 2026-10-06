@@ -179,9 +179,33 @@ def test_amounts(s, v):
 
 
 def test_fresh_dedups_same_amount_nearby():  # та же сумма ±3 дня — уже есть; каждая имеющаяся — только для одной строки
-    existing = [("2026-10-01", -38.17), ("2026-10-03", -12.5)]
-    new, dup = S.fresh(existing, [S.Tx("2026-10-02", -38.17), S.Tx("2026-10-07", -12.5), S.Tx("2026-10-02", -38.17)])
-    assert dup == 1 and [(t.date, t.amount) for t in new] == [("2026-10-07", -12.5), ("2026-10-02", -38.17)]
+    existing = [{"id": "a:O;1", "date": "2026-10-01", "amount": -38.17, "description": "WROCLAWSKLEPPL"},
+                {"id": "a:O;2", "date": "2026-10-03", "amount": -12.5, "description": "SKLEP"}]
+    new, pairs = S.fresh(existing, [S.Tx("2026-10-02", -38.17), S.Tx("2026-10-07", -12.5), S.Tx("2026-10-02", -38.17)])
+    assert len(pairs) == 1 and [(t.date, t.amount) for t in new] == [("2026-10-07", -12.5), ("2026-10-02", -38.17)]
+
+
+def test_fresh_matches_blik_by_reference_first():
+    """BLIK из PKO: описание операции — её номер; строка файла с тем же «Numer referencyjny» — она, даже если та же
+    сумма ближе по дате у другой операции."""
+    existing = [{"id": "a:O;1", "date": "2026-10-01", "amount": -10.0, "description": "00000000000000007"},
+                {"id": "a:O;2", "date": "2026-10-05", "amount": -10.0, "description": "00000000000000008"}]
+    new, pairs = S.fresh(existing, [S.Tx("2026-10-05", -10.0, ref="00000000000000007")])
+    assert not new and pairs[0][0]["id"] == "a:O;1"
+
+
+@pytest.mark.parametrize("text,amount,code", [
+    ("Przelew na telefon przychodz. zew.", -20.0, "MOBILE-PAYMENT-C2C-EXTERNAL"),
+    ("Przelew na telefon przychodz. wew.", 15.0, "MOBILE-PAYMENT-C2C"),
+    ("Wpłata BLIKIEM we wpłatomacie", 2000.0, "CASH-IN-ATM-TX-CODE"),
+    ("Wpłata gotówki we wpłatomacie", 500.0, "CASH-IN-ATM"),
+    ("Wpłata gotówkowa w kasie", 100.0, "CASH-IN"),
+    ("Zwrot w terminalu", 79.98, "MOBILE-PAYMENT-POS-RETURN"),
+    ("Naliczenie odsetek", -0.04, "INTEREST"),
+    ("Opłata za użytkowanie karty", -5.0, "CARD-FEE"),
+    ("Przelew natychmiastowy", -100.0, "TRANSFER-EXPRESS-ELIXIR")])
+def test_ipko_types_as_bank_codes(text, amount, code):  # типы iPKO — в те же коды, что у этих операций из банка
+    assert S.type_of(text, amount) == code
 
 
 def test_import_into_linked_account(tmp_path, monkeypatch):
@@ -199,3 +223,38 @@ def test_import_into_linked_account(tmp_path, monkeypatch):
     assert len(ids) == 3 and all(";" in i for i in ids)
     again = S.import_file(write(tmp_path, "historia2.csv", IPKO, "cp1250"), con)
     assert again["new"] == 0 and again["dup"] == 4  # повторный файл — ничего нового
+
+
+BLIK_ROW = ('"Data operacji","Data waluty","Typ transakcji","Kwota","Waluta","Saldo po transakcji","Opis transakcji","","",""\n'
+            '"2026-10-01","2026-09-30","Płatność web - kod mobilny","-438.50","PLN","+877.98","Tytuł: 00000000000000009  ",'
+            '"Numer telefonu: 48500000000","Lokalizacja: Adres: http://www.example.nl/","Numer referencyjny: 00000000000000009"\n')
+
+
+def test_import_enriches_blik_from_bank(tmp_path, monkeypatch):
+    """BLIK из банка — только номер; та же операция в файле — с адресом магазина: адрес дописывается к операции
+    из банка и переживает пересборку выписки из сохранённого ответа банка."""
+    from core import db
+    from bank import enablebanking
+    monkeypatch.setattr(db, "DB", tmp_path / "t.db")
+    con = db.connect()
+    raw = {"entry_reference": "O;9", "transaction_amount": {"currency": "PLN", "amount": "438.50"},
+           "credit_debit_indicator": "DBIT", "booking_date": "2026-10-01", "debtor_account": {"iban": "PL00"},
+           "remittance_information": ["00000000000000009", "MOBILE-PAYMENT-POS-NO-CARD-TX-CODE"]}
+    con.execute("INSERT INTO bank_tx (id, date, amount, type, description, raw) VALUES (?,?,?,?,?,?)",
+                ("abcd1234:O;9", "2026-10-01", -438.5, "MOBILE-PAYMENT-POS-NO-CARD-TX-CODE", "00000000000000009", json.dumps(raw)))
+    r = S.import_file(write(tmp_path, "blik.csv", BLIK_ROW, "cp1250"), con)
+    assert (r["new"], r["dup"], r["enriched"]) == (0, 1, 1)
+    desc, stored = con.execute("SELECT description, raw FROM bank_tx WHERE id = 'abcd1234:O;9'").fetchone()
+    assert desc == "00000000000000009 http://www.example.nl/"
+    assert enablebanking.parse_tx(json.loads(stored), "abcd1234")[6] == desc  # пересборка выписки — то же описание
+
+
+def test_balance_available_minus_blocked():
+    """Остаток банка: доступный (без заблокированных покупок) и сколько заблокировано."""
+    from bank import enablebanking
+    bal = lambda **kw: [{"balance_type": t, "balance_amount": {"amount": str(v), "currency": "PLN"}} for t, v in kw.items()]
+    assert enablebanking.balance(bal(ITBD=500.0, ITAV=420.5)) == {"amount": 420.5, "booked": 500.0, "blocked": 79.5}
+    # доступный с кредитным лимитом больше учтённого — блокировок не узнать, остаток — по выписке
+    assert enablebanking.balance(bal(ITBD=100, ITAV=2100)) == {"amount": 100.0, "booked": 100.0, "blocked": 0.0}
+    assert enablebanking.balance(bal(CLBD=50)) == {"amount": 50.0, "booked": 50.0, "blocked": 0.0}
+    assert enablebanking.balance([]) is None

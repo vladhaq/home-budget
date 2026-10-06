@@ -17,12 +17,13 @@
   python budget.py photos [папка|файлы]           фото/сканы/PDF чеков с диска (по умолчанию receipts/inbox)
   python budget.py report                         старый статичный HTML-отчёт (всё есть в serve)
   python budget.py item <товар>                   цены товара по твоим чекам
+  python budget.py upgrade [--check]              новая версия программы с GitHub (данные не трогаются)
 
 Газетки и скидки Lidl — отдельно: python lidl-deals/lidl.py
 """
 import sys
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 
 def main(argv: list[str]):
@@ -62,6 +63,9 @@ def main(argv: list[str]):
     elif cmd == "mail":
         from receipts import mail
         mail.main(rest)
+    elif cmd == "upgrade":
+        from core import upgrade
+        upgrade.main(rest)
     elif cmd in ("version", "--version"):
         print(f"Домашний бюджет {__version__}")
     elif cmd == "serve":

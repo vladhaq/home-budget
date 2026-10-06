@@ -1,8 +1,12 @@
 """Локальный веб-интерфейс бюджета: python budget.py serve -> http://127.0.0.1:8765"""
 import datetime as dt
 import json
+import os
 import re
+import subprocess
+import sys
 import threading
+import time
 import webbrowser
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -153,7 +157,8 @@ def bank():
     except Exception:  # noqa: BLE001
         pass
     incomes = _incomes(con)
-    return jsonify({"balance": balance, "income": income, "months": months, "incomes": incomes,
+    from core.analytics import bank_now
+    return jsonify({"balance": balance, "income": income, "months": months, "incomes": incomes, "now": bank_now(con),
                     "valid_until": session.get("valid_until"), "last": get_meta(con, "bank_last_date")})
 
 
@@ -207,7 +212,7 @@ def bank_import():
             results.append(statement.import_file(path))
         except (ValueError, KeyError, OSError) as e:
             results.append({"file": f.get("name"), "error": str(e)})
-    if any(r.get("new") for r in results):
+    if any(r.get("new") or r.get("enriched") for r in results):
         reconcile.match(verbose=False)
     return jsonify(ok=True, results=results)
 
@@ -566,7 +571,54 @@ def update_state():
     running = update.is_running()
     if not running:
         update.mark_dead(con)
-    return jsonify({"running": running, "runs": update.runs(con, 30), "sources": update.sources(con)})
+    return jsonify({"running": running, "runs": update.runs(con, 30), "sources": update.sources(con),
+                    "login": login_state(con), "version": VERSION})
+
+
+LOGIN = {}  # вход, запущенный из интерфейса: {"key", "started", "proc"}
+LOGIN_LOG = DATA / "login.log"
+
+
+def login_running() -> bool:
+    return bool(LOGIN) and LOGIN["proc"].poll() is None
+
+
+def login_state(con) -> dict | None:
+    """Идёт ли вход и чем кончился: удался — если после запуска записан новый вход (core/logins.record)."""
+    if not LOGIN:
+        return None
+    from core import logins
+    running = login_running()
+    text = LOGIN_LOG.read_text(encoding="utf-8", errors="replace") if LOGIN_LOG.exists() else ""
+    lines = [s.strip() for s in text.splitlines() if s.strip() and not s.startswith(("Traceback", " "))]
+    since = logins.state(con, LOGIN["key"])["since"] or ""
+    return {"key": LOGIN["key"], "title": logins.SOURCES[LOGIN["key"]], "started": LOGIN["started"], "running": running,
+            "ok": not running and since >= LOGIN["started"], "message": lines[-1] if lines else ""}
+
+
+@app.post("/api/login/<key>")
+def login_start(key):
+    """Вход в Lidl Plus / Kaufland / банк: отдельный процесс открывает окно Chrome, логин, пароль и коды вводишь там
+    сам — программа их не видит. Интерфейс следит за ним через /api/update (поле login). В «Обновить всё» не входит."""
+    import os
+    import subprocess
+    import sys
+
+    from core import logins
+    if key not in logins.SOURCES:
+        return jsonify(ok=False, error="неизвестный источник"), 404
+    if login_running():
+        return jsonify(ok=False, error=f"уже идёт вход: {logins.SOURCES[LOGIN['key']]} — закончи его в окне Chrome"), 409
+    if update.is_running() or UPGRADE.get("state") in ("running", "restarting"):
+        return jsonify(ok=False, error="идёт обновление — дождись, пока закончится"), 409
+    started = logins.now()
+    with open(LOGIN_LOG, "w", encoding="utf-8") as out:
+        proc = subprocess.Popen([sys.executable, "-u", str(BUDGET / "budget.py"), key, "login"], cwd=BUDGET,
+                                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    LOGIN.update(key=key, started=started, proc=proc)
+    return jsonify(ok=True)
 
 
 @app.get("/api/update/schedule")
@@ -582,6 +634,10 @@ def update_run():
 
     if update.is_running():
         return jsonify(ok=False, error="обновление уже идёт"), 409
+    if UPGRADE.get("state") in ("running", "restarting"):
+        return jsonify(ok=False, error="устанавливается новая версия программы — подожди"), 409
+    if login_running():  # вход и обновление одного источника одновременно перезапишут друг другу токен
+        return jsonify(ok=False, error="идёт вход в окне Chrome — закончи его или закрой окно"), 409
     steps = [s for s in (request.get_json(silent=True) or {}).get("steps", []) if s in update.TITLES]
     subprocess.Popen([sys.executable, str(BUDGET / "budget.py"), "update", *steps, "--trigger", "ui"], cwd=BUDGET,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -599,10 +655,76 @@ def update_schedule_set():
     return jsonify(ok=True, schedule=s)
 
 
+# ---------------------------------------------------------------- новая версия программы (страница «Настройки»)
+
+from core import upgrade  # noqa: E402
+
+VERSION = upgrade.current()  # версия запущенного кода (файлы на диске после установки — уже новые)
+SUPERVISED = os.environ.get("BUDGET_SUPERVISED") == "1"  # запущен «сторожем» serve — может перезапуститься сам
+UPGRADE = {}  # идущая установка: {"state": running|restarting|done|error, "step", "version", "error"}
+
+
+@app.get("/api/upgrade/check")
+def upgrade_check():
+    return jsonify(upgrade.check() | {"running": VERSION, "auto_restart": SUPERVISED})
+
+
+@app.get("/api/upgrade/status")
+def upgrade_status():
+    return jsonify(UPGRADE | {"running": VERSION})
+
+
+@app.post("/api/upgrade/install")
+def upgrade_install():
+    """Установка в фоне: интерфейс следит за /api/upgrade/status, после перезапуска сервера перезагружает страницу."""
+    if UPGRADE.get("state") in ("running", "restarting"):
+        return jsonify(ok=False, error="установка уже идёт"), 409
+    if update.is_running() or login_running():
+        return jsonify(ok=False, error="идёт обновление данных или вход — дождись конца"), 409
+    info = upgrade.check()
+    if "error" in info or not info.get("newer"):
+        return jsonify(ok=False, error=info.get("error") or "новой версии нет"), 409
+    if info["blocker"]:
+        return jsonify(ok=False, error=info["blocker"]), 409
+    UPGRADE.clear()
+    UPGRADE.update(state="running", step="начинаю…", version=info["latest"]["version"])
+
+    def work():
+        try:
+            r = upgrade.install(info["latest"], say=lambda s: UPGRADE.update(step=s))
+        except Exception as e:  # noqa: BLE001 — показываем в интерфейсе
+            UPGRADE.update(state="error", error=str(e))
+            return
+        UPGRADE.update(result=r)
+        if SUPERVISED:  # «сторож» запустит сервер заново — уже с новым кодом
+            UPGRADE.update(state="restarting", step="перезапускаю сервер…")
+            threading.Timer(1.5, lambda: os._exit(upgrade.RESTART)).start()
+        else:
+            UPGRADE.update(state="done", step="установлено — перезапусти сервер: python budget.py serve")
+
+    threading.Thread(target=work, daemon=True).start()
+    return jsonify(ok=True)
+
+
 def serve(open_browser=True):
+    """Сервер — дочерним процессом «сторожа»: после установки новой версии он выходит с кодом upgrade.RESTART
+    и запускается заново уже с новыми файлами. Ctrl+C останавливает оба."""
+    if not SUPERVISED:
+        args = [sys.executable, str(BUDGET / "budget.py"), "serve"] + ([] if open_browser else ["--no-browser"])
+        env = {**os.environ, "BUDGET_SUPERVISED": "1"}
+        while True:
+            try:
+                rc = subprocess.call(args, env=env)
+            except KeyboardInterrupt:
+                return
+            if rc != upgrade.RESTART:
+                sys.exit(rc)
+            print("\nНовая версия установлена — перезапускаю сервер…", flush=True)
+            args = [a for a in args if a != "--no-browser"] + ["--no-browser"]  # браузер уже открыт
+            time.sleep(0.5)
     categories.seed(connect())  # схема базы и дерево категорий — до первого запроса
     url = f"http://{HOST}:{PORT}"
-    print(f"Бюджет: {url}  (Ctrl+C — остановить)")
+    print(f"Бюджет {VERSION}: {url}  (Ctrl+C — остановить)", flush=True)
     if open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     app.run(host=HOST, port=PORT, debug=False)

@@ -21,6 +21,13 @@ GOLDEN = [
     ("OnePlus 11 8gb 128gb black", "goods.electronics"),
     ("Jack & Jones Szorty jeansowe - blue denim", "goods.clothes"),
     ("Blend Denim shorts - denim white", "goods.clothes"),
+    ("Levi's 501 DENIM SHORT GREY", "goods.clothes"),
+    ("AllSaints BONES OTH HOODY WASHED BLACK", "goods.clothes"),
+    ("2 SZT. M446 CZARNY KLOCEK KLOCKI HAMULCOWE ROWEROWE DO ROWERU 30MM", "transport.bike"),
+    ("OKŁADZINY (KLOCKI) HAMULCOWE M446 ŻYWICZNE 1 PAR", "transport.bike"),
+    ("ZAPIĘCIE ROWEROWE GERDA ŁAŃCUCH ZAPIĘCIE DO ROWERU STRONG ONE 900/6V LEKKI", "transport.bike"),
+    ("Pokrowiec Na Rower Wodoodporny Motor Skuter Z Klamrą 200x110x70 Ściągacz", "transport.bike"),
+    ("MOCNY UCHWYT NA ROWER MOTOR ROWEROWY DO TELEFONU TELEFON ZACISK PEWNY CHWYT", "transport.bike"),
     ("Odkurzacz piorący THOMAS Vestfalia XT", "goods.appliances"),
     ("Oczyszczacz powietrza XIAOMI Air Purifier 6", "goods.appliances"),
     # дом
@@ -69,6 +76,19 @@ GOLDEN = [
     ("Puszka zwrotna ALU", "other.deposit"), ("Usługa Allegro Smart! 12 miesięcy", "comms.subscriptions"),
     ("Koszt płatności", "finance.bank"),
 ]
+
+
+def test_pharmacy_syrup_is_pharmacy(tmp_path, monkeypatch):
+    """В аптеке «съедобное» слово словаря (сироп) — лекарство: категория аптеки, а не «Напитки»."""
+    from core import categories, db
+    monkeypatch.setattr(db, "DB", tmp_path / "t.db")
+    con = db.connect()
+    categories.seed(con)
+    db.save_purchase(con, {"id": "email:x:1", "source": "email", "date": "2026-01-01T12:00:00", "merchant": "Apo-Discounter",
+                           "total": 60.0}, [{"name": "Syrop testowy (200 ml)", "qty": 1, "unit_price": 60.0, "amount": 60.0}])
+    categories.categorize(con)
+    key = con.execute("SELECT c.key FROM items i JOIN categories c ON c.id = i.category_id").fetchone()[0]
+    assert key == "health.pharmacy"
 
 
 @pytest.mark.parametrize("name,key", GOLDEN)
