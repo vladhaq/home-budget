@@ -7,6 +7,7 @@
 |---|---|---|
 | Lidl Plus | чеки с позициями, скидками, способом оплаты | API приложения (вход в окне Chrome) |
 | Kaufland Card | чеки с позициями, скидками, отделами магазина, залогом за тару | API приложения (вход в окне Chrome) |
+| Biedronka | чеки в PDF, позиции, скидки | сайт Moja Biedronka в Chrome |
 | Фото/сканы чеков | любые магазины, наличные | Telegram-группа или папка, распознавание Tesseract (+EasyOCR) |
 | Почта Gmail | онлайн-заказы (Allegro, Koleo, DOZ, Media Expert…), подписки, оплаты через PayU/Tpay/Przelewy24 | IMAP, только чтение |
 | Банк PKO | все операции счёта, остаток, доходы | Enable Banking (PSD2, только чтение) |
@@ -25,7 +26,7 @@
 ## Быстрый старт (первый запуск)
 
 1. Установи **Python 3.13** с [python.org](https://www.python.org/downloads/) — при установке отметь
-   **«Add python.exe to PATH»**. Для входа в Lidl, Kaufland и банк нужен **Google Chrome**,
+   **«Add python.exe to PATH»**. Для входа в Lidl, Kaufland, Biedronka и банк нужен **Google Chrome**,
    для фото чеков — **Tesseract** (см. [Установка](#установка)).
 2. Открой терминал в папке проекта (в Проводнике: правый клик по папке → «Открыть в терминале») и выполни:
    ```
@@ -56,7 +57,7 @@
    позиций не сошлась с итогом). EasyOCR ставится вместе со всем, но тянет PyTorch — это **~1–2 ГБ** и несколько минут
    установки. Если место или интернет ограничены — перед установкой удали строку `easyocr` из `requirements.txt`:
    всё будет работать, фото будут распознаваться только Tesseract. Поставить позже: `pip install easyocr`.
-2. **Google Chrome** — нужен для входа в Lidl, Kaufland и банк. Подходящий драйвер скачивается сам
+2. **Google Chrome** — нужен для входа в Lidl, Kaufland, Biedronka и банк. Подходящий драйвер скачивается сам
    (старый chromedriver в PATH игнорируется).
 3. **Tesseract OCR** — для фото чеков:
    ```
@@ -70,7 +71,7 @@
 ## Настройка источников
 
 Каждый источник настраивается один раз. Пароли и коды **всегда вводишь ты сам** — в окне браузера
-или в терминале; скрипты их не видят и не хранят. Сохраняются только токены доступа (см. [Безопасность](#безопасность)).
+или в терминале; скрипты их не видят и не хранят. Данные сеанса сохраняются локально, см. [Безопасность](#безопасность).
 
 ### Lidl Plus
 ```
@@ -89,6 +90,18 @@ python budget.py kaufland sync
   отделы магазина (помогают с категориями), способ оплаты, сдача, последние цифры карты.
 - Суммы позиций в API — уже после скидок; в базе хранится цена без скидки + скидка отдельно.
 - API найден в открытом проекте [Bonfire](https://github.com/Naxter/bonfire), неофициальный — может сломаться.
+
+### Biedronka
+```
+python budget.py biedronka sync
+```
+- Чтобы подключить уже авторизованный обычный Chrome, один раз загрузи расширение **Budget Browser Connector** из `C:\LB\budget\tools\browser-connector` через `chrome://extensions` → «Режим разработчика» → «Загрузить распакованное расширение». После обновления файлов расширения нажми на его карточке кнопку перезагрузки и обнови вкладку бюджета. Войди в Moja Biedronka, нажми значок расширения и кнопку «Подключить к бюджету». Расширение автоматически создаёт одноразовый код, берёт cookies домена Biedronka и отправляет их только локальному приложению `http://127.0.0.1:8765`; приложение проверяет сессию и сохраняет её в `data/biedronka/session.json`. Пароль не читается и не сохраняется.
+- Если сессия сайта истекла, войди в Biedronka в обычном Chrome и повтори передачу через расширение. Автоматизированный вход и обход Cloudflare не используются.
+- Программа последовательно запрашивает полный список чеков по месяцам начиная с 01.01.2023, скачивает PDF по одному в хронологическом порядке и распознаёт/сохраняет их в базу. Если сайт отклонит сохранённую сессию, потребуется повторный вход в Chrome. Более ранние чеки не запрашиваются; период можно сузить: `python budget.py biedronka sync --from 2026-10-01 --to 2026-10-06`.
+- Для сканированных PDF нужен Tesseract OCR.
+- Сохранённая сессия и скачанные PDF остаются локально в `data/biedronka/`; cookies передаются только на локальный компьютер.
+- Синхронизация запускается вручную командой выше или из «Настроек»; для обновления истёкшей сессии повтори передачу через расширение.
+- Это автоматизация веб-интерфейса, не API. Если Biedronka изменит сайт, автоматическую загрузку может понадобиться обновить.
 
 ### Фото и сканы чеков (Telegram)
 В `config.ini`:
@@ -353,11 +366,15 @@ python budget.py backup restore budget_2026-10-01_172002.zip
 | `config.ini` | ключи Telegram API |
 | `data/lidl/token.json` | доступ к Lidl Plus |
 | `data/kaufland/token.json` | доступ к Kaufland Card |
+| `data/biedronka/session.json` | cookies сессии Moja Biedronka |
+| `data/biedronka/downloads/` | скачанные PDF чеков |
 | `data/telegram.session` | вход в твой Telegram |
 | `data/bank/*.pem`, `data/bank/session.json` | ключ приложения Enable Banking и доступ к выписке |
 | Диспетчер учётных данных Windows: `budget-gmail-imap`, `budget-backup` | пароль приложения Gmail, пароль копий |
 
 Резервные копии содержат всё перечисленное — поэтому они зашифрованы.
+Расширение Biedronka имеет доступ к cookies домена Biedronka и отправляет их только на локальный сервер бюджета
+(`127.0.0.1:8765`); устанавливай распакованное расширение только из папки этого проекта.
 Отозвать доступ: Lidl/Kaufland — сменить пароль; Gmail — удалить пароль приложения в аккаунте Google;
 банк — Unlink / Remove в Control Panel Enable Banking или отзыв согласия в iPKO.
 
@@ -371,6 +388,7 @@ python budget.py update    [шаги | status]               обновить в
 python budget.py schedule  on [ЧЧ:ММ] | off | status     автозапуск обновления каждый день
 python budget.py lidl      login | sync | reparse        Lidl Plus
 python budget.py kaufland  login | sync | reparse        Kaufland Card
+python budget.py biedronka sync                          PDF чеков через сайт
 python budget.py telegram                                фото чеков из Telegram
 python budget.py photos [папка|файлы]                    фото/PDF чеков с диска (по умолчанию receipts/inbox)
 python budget.py mail      login | headers | senders [N] | mark <метка> <домены> | bodies | parse
@@ -435,6 +453,7 @@ budget/
     common.py            общие функции
   receipts/
     lidl.py, kaufland.py           чеки из приложений
+    biedronka.py                   PDF чеков через веб-интерфейс
     photos.py, textparse.py        фото чеков и разбор текста чека
     telegram_inbox.py              фото из Telegram
     mail.py, mail_parse.py, mail_orders.py   почта

@@ -1,6 +1,8 @@
 // Страница «Настройки»: обновление, источники, автозапуск, журнал.
 // ---------- настройки: обновление данных, источники, автозапуск, журнал
 let UPD = null, SCHED = null, updTimer = null, UPD_WAIT = null;
+let BIEDRONKA_EXTENSION = null, BIEDRONKA_EXTENSION_CHECKING = false;
+let BIEDRONKA_SESSION = null, BIEDRONKA_SESSION_CHECKING = false;
 const UST = {ok: ["✓", "--green", "готово"], warn: ["!", "--orange", "внимание"], off: ["!", "--orange", "не настроено"],
              skip: ["–", "--text-2", "пропущено"], error: ["✗", "--red", "ошибка"], running: ["…", "--accent", "идёт"]};
 const TRIG = {manual: "из терминала", schedule: "автозапуск", ui: "из интерфейса"};
@@ -11,13 +13,55 @@ const dur = (a, b) => { if (!a || !b) return ""; const s = Math.round((new Date(
 const cmd = c => c ? (/^python /.test(c) ? `<code data-copy="${esc(c)}" title="нажми, чтобы скопировать">${esc(c)}</code>` : esc(c)) : "";
 const updRunning = () => !!(UPD_WAIT || (UPD && UPD.running));
 
+function checkBiedronkaExtension() {
+  if (BIEDRONKA_EXTENSION !== null || BIEDRONKA_EXTENSION_CHECKING) return;
+  BIEDRONKA_EXTENSION_CHECKING = true;
+  const deadline = Date.now() + 2000;
+  const check = () => {
+    if (document.getElementById("home-budget-biedronka-extension")) {
+      BIEDRONKA_EXTENSION = true;
+      BIEDRONKA_EXTENSION_CHECKING = false;
+      if (S.page === "settings") drawSettings();
+      return;
+    }
+    if (Date.now() < deadline) {
+      setTimeout(check, 100);
+    } else {
+      BIEDRONKA_EXTENSION_CHECKING = false;
+      BIEDRONKA_EXTENSION = false;
+      if (S.page === "settings") drawSettings();
+    }
+  };
+  check();
+}
+
 async function renderSettings() {
+  BIEDRONKA_SESSION = null;
+  checkBiedronkaExtension();
+  checkBiedronkaSession();
   if (!UPD) UPD = await (await fetch("/api/update")).json();
   if (!SCHED) {
     SCHED = {loading: true};
     fetch("/api/update/schedule").then(r => r.json()).then(s => { SCHED = s; if (S.page === "settings") drawSettings(); });
   }
   drawSettings();
+}
+async function checkBiedronkaSession() {
+  if (BIEDRONKA_SESSION !== null || BIEDRONKA_SESSION_CHECKING) return;
+  BIEDRONKA_SESSION_CHECKING = true;
+  try {
+    const response = await fetch("/api/biedronka/session-status");
+    const result = await response.json();
+    if (!response.ok || !["valid", "missing", "expired", "unavailable"].includes(result.status)) {
+      throw new Error("Unexpected Biedronka session status response");
+    }
+    BIEDRONKA_SESSION = result.status;
+  } catch {
+    BIEDRONKA_SESSION = "unavailable";
+  } finally {
+    BIEDRONKA_SESSION_CHECKING = false;
+    if (S.page === "settings") drawSettings();
+  }
 }
 function drawSettings() {
   const main = document.getElementById("main"), last = UPD.runs[0], run = updRunning();
@@ -36,9 +80,22 @@ function drawSettings() {
         : lastDone ? `Последнее обновление: <b>${dtf(lastDone.finished)}</b> (${TRIG[lastDone.trigger] || lastDone.trigger}) ${stBadge(lastDone.status)}
             <span class="muted">${esc(lastDone.summary || "")}</span>` : "Обновлений ещё не было."}</span>
     </div>
-    <p class="muted">По очереди: Lidl, Kaufland, почта, фото из Telegram и папки receipts/inbox, выписка PKO, сверка и категории,
-      резервная копия. Обычно 1–2 минуты. Ошибка одного источника не останавливает остальные.
-      Входы (логины, пароли) здесь не запрашиваются — если вход устарел, в строке источника будет команда для терминала.</p>
+    <p class="muted">По очереди: Lidl, Kaufland, Biedronka, почта, фото из Telegram и папки receipts/inbox, выписка PKO, сверка и категории,
+      резервная копия. Обычно 1–2 минуты; первая загрузка чеков Biedronka может занять дольше. Ошибка одного источника не останавливает остальные.
+      Пароли здесь не запрашиваются; Biedronka подключается расширением Chrome, остальные источники — по команде из строки.</p>
+
+    ${BIEDRONKA_SESSION === "missing" || BIEDRONKA_SESSION === "expired" ? `
+      <h2>Подключение Biedronka</h2>
+      <div class="updbox">
+        ${BIEDRONKA_EXTENSION === false ? `<div class="muted">Расширение «Budget Browser Connector» не обнаружено. В Chrome открой
+          <code>chrome://extensions</code>, включи «Режим разработчика» и выбери «Загрузить распакованное расширение»,
+          указав папку <code>C:\\LB\\budget\\tools\\browser-connector</code>.</div>` : ""}
+        <div><b>${BIEDRONKA_SESSION === "expired" ? "Сессия Moja Biedronka истекла" : "Biedronka ещё не подключена"}</b>
+          <div class="muted">Войди в Moja Biedronka, нажми значок расширения «Budget Browser Connector» и кнопку «Подключить к бюджету».
+            Cookies передаются только этому приложению на этом компьютере.</div></div>
+      </div>
+      ` : ""}
+    ${BIEDRONKA_SESSION === "unavailable" ? `<p class="muted">Не удалось проверить сессию Biedronka: сайт временно недоступен. Попробуй позже.</p>` : ""}
 
     <h2>Источники</h2>
     <table><tr><th>источник</th><th>подключение</th><th>успешно обновлено</th><th>данные по</th><th>последний результат</th><th></th></tr>` +
@@ -111,6 +168,5 @@ async function setSchedule(on) {
   catch (e) { SCHED = null; toast("Не получилось: " + e.message); }
   if (S.page === "settings") renderSettings();
 }
-
 // «^medaliony\ z\ fileta$» -> «medaliony z fileta» (точное название); остальное показываем как есть
 const humanPattern = p => /^\^.*\$$/.test(p) ? p.slice(1, -1).replace(/\\(.)/g, "$1") : p;

@@ -5,6 +5,7 @@
   python budget.py schedule on [ЧЧ:ММ] | off | status   автозапуск обновления каждый день
   python budget.py lidl login | sync | reparse   чеки Lidl Plus
   python budget.py kaufland login | sync | reparse   чеки Kaufland Card
+  python budget.py biedronka sync             скачать PDF чеков через Moja Biedronka
   python budget.py categorize                     назначить категории (делается и после sync)
   python budget.py unknown                        неопознанные позиции
   python budget.py setcat "<шаблон>" "Еда/Сладкое"   правило категории (до веб-интерфейса)
@@ -41,6 +42,9 @@ def main(argv: list[str]):
         kaufland.main(rest)
         if rest and rest[0] in ("sync", "reparse"):
             categorize()
+    elif cmd == "biedronka":
+        from receipts import biedronka
+        biedronka.main(rest)
     elif cmd == "bank":
         from bank import enablebanking
         enablebanking.main(rest)

@@ -1,13 +1,13 @@
-"""Обновить всё: чеки Lidl и Kaufland, почта, фото чеков (Telegram и папка), выписка PKO, сверка, резервная копия.
+"""Обновить всё: чеки Lidl, Kaufland и Biedronka, почта, фото чеков (Telegram и папка), выписка PKO, сверка, резервная копия.
 
   python budget.py update                      все шаги по очереди; ошибка одного шага не останавливает остальные
-  python budget.py update lidl bank            только выбранные шаги (сверка добавляется сама)
+  python budget.py update lidl biedronka bank  только выбранные шаги (сверка добавляется сама)
   python budget.py update status               последние запуски и что в них сломалось
   python budget.py schedule on [ЧЧ:ММ]         автозапуск каждый день (Планировщик Windows), по умолчанию 07:30
   python budget.py schedule off | status
 
 Журнал запусков хранится в базе (update_runs, update_steps) и виден в интерфейсе на странице «Настройки».
-Входы (lidl/kaufland/bank login, первый вход в Telegram, пароль почты) здесь не запрашиваются: если вход
+Входы (lidl/kaufland/bank login, подключение Biedronka в настройках, первый вход в Telegram, пароль почты) здесь не запрашиваются: если вход
 устарел, шаг завершается ошибкой с подсказкой, какую команду запустить.
 
 config.ini (необязательно):
@@ -104,6 +104,22 @@ def step_kaufland(con):
     kaufland.sync()
     new = n_purchases(con, "kaufland") - before
     return "ok", f"новых чеков: {new}" if new else "новых чеков нет"
+
+
+def step_biedronka(con):
+    from receipts import biedronka
+    if not biedronka.SESSION.exists():
+        raise Skip("не подключено", "Открой Настройки → Подключить Biedronka")
+    before = n_biedronka_receipts(con)
+    biedronka.sync()
+    new = n_biedronka_receipts(con) - before
+    return "ok", f"новых чеков: {new}" if new else "новых чеков нет"
+
+
+def n_biedronka_receipts(con) -> int:
+    purchases = count(con, "SELECT count(*) FROM purchases WHERE merchant = 'Biedronka'")
+    attached = count(con, "SELECT count(*) FROM attachments WHERE source_ref LIKE 'biedronka:%'")
+    return purchases + attached
 
 
 def mail_ready() -> bool:
@@ -281,6 +297,7 @@ def step_backup(con):
 STEPS = [
     ("lidl", "Чеки Lidl Plus", step_lidl),
     ("kaufland", "Чеки Kaufland", step_kaufland),
+    ("biedronka", "Чеки Biedronka", step_biedronka),
     ("mail", "Почта Gmail", step_mail),
     ("telegram", "Фото чеков из Telegram", step_telegram),
     ("photos", "Папка receipts/inbox", step_photos),
@@ -290,7 +307,7 @@ STEPS = [
     ("backup", "Резервная копия", step_backup),
 ]
 TITLES = {k: t for k, t, _ in STEPS}
-NETWORK = {"lidl", "kaufland", "mail", "telegram", "bank", "deals"}
+NETWORK = {"lidl", "kaufland", "biedronka", "mail", "telegram", "bank", "deals"}
 
 
 # ---------------------------------------------------------------- запуск
@@ -376,7 +393,7 @@ def run(trigger: str = "manual", only: list[str] | None = None) -> int | None:
     con = db()
     mark_dead(con)
     steps = [s for s in STEPS if not only or s[0] in only]
-    if only and set(only) & {"lidl", "kaufland", "mail", "telegram", "photos", "bank"} and "reconcile" not in only:
+    if only and set(only) & {"lidl", "kaufland", "biedronka", "mail", "telegram", "photos", "bank"} and "reconcile" not in only:
         steps.append(next(s for s in STEPS if s[0] == "reconcile"))  # новые покупки без сверки и категорий не видны
     cur = con.execute("INSERT INTO update_runs (started, trigger, steps) VALUES (?, ?, ?)",
                       (now(), trigger, ",".join(k for k, _, _ in steps)))
@@ -464,7 +481,7 @@ def sources(con) -> list[dict]:
     import keyring
     from bank import enablebanking
     from core import backup
-    from receipts import kaufland, lidl, photos
+    from receipts import biedronka, kaufland, lidl, photos
 
     def last(step, ok_only=False):
         q = "SELECT * FROM update_steps WHERE step = ? AND status != 'running'" + \
@@ -485,6 +502,9 @@ def sources(con) -> list[dict]:
                  f"чеков: {n_purchases(con, 'lidl')}"),
         "kaufland": (kaufland.TOKEN.exists(), "python budget.py kaufland login", max_date("kaufland"),
                      f"чеков: {n_purchases(con, 'kaufland')}"),
+        "biedronka": (biedronka.SESSION.exists(), "Открой Настройки → Подключить Biedronka",
+                      con.execute("SELECT max(date) FROM purchases WHERE merchant = 'Biedronka'").fetchone()[0],
+                      f"чеков: {n_biedronka_receipts(con)}"),
         "mail": (mail_ready(), "python budget.py mail login",
                  con.execute("SELECT max(date) FROM emails").fetchone()[0] if have_emails else None,
                  f"покупок из писем: {n_purchases(con, 'email')}"),

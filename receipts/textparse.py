@@ -48,6 +48,7 @@ def parse_text(text: str) -> dict:
     lines = [re.sub(r"(?<=\d[.,]\d)[Oo]", "0", re.sub(r"(?<=\d[.,])[Oo]", "0", ln)) for ln in lines]
     lines = [ln for ln in lines if ln]
     items, totals, dates, payments, pending = [], [], [], [], None
+    pending_discount = False
     # товары — между «PARAGON FISKALNY» (если распознан) и «Sprzedaż opodatkowana»/«SUMA»
     start = next((n for n, ln in enumerate(lines) if "paragon" in fold(ln) and "fiskal" in fold(ln)), -1)
     in_items = start < 0
@@ -62,7 +63,19 @@ def parse_text(text: str) -> dict:
             dates.append(_date(m, ln))
         if m := TOTAL_RE.match(low.replace(" ", " ")):
             totals.append(num(re.sub(r"\s", ".", m.group(3))))
+            pending_discount = False
             continue
+        if re.fullmatch(r"rabat\s*:?", low):
+            pending_discount = True
+            pending = None
+            continue
+        if pending_discount:
+            amount = re.fullmatch(rf"\s*({AMOUNT})\s*[A-DĄ4]?\s*", ln)
+            if amount and items:
+                items[-1]["discount"] = round((items[-1]["discount"] or 0) + abs(num(amount.group(1))), 2)
+                pending_discount = False
+                continue
+            pending_discount = False
         if SUMMARY_RE.match(low):
             pending = None
             continue
@@ -148,7 +161,13 @@ def detect_merchant(text: str) -> str | None:
 
 
 def detect_store(lines: list[str]) -> str | None:
-    """Адрес точки: последняя строка с почтовым индексом до NIP (первая обычно — адрес головного офиса)."""
+    """Prefer the branch label on Biedronka receipts; otherwise use the printed store address."""
+    for ln in lines:
+        if fold(ln).startswith("nip"):
+            break
+        if re.match(r"^sklep\b", fold(ln)):
+            return ln.strip()
+
     cand = []
     for ln in lines:
         if fold(ln).startswith("nip"):
