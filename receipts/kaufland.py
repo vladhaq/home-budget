@@ -18,6 +18,7 @@ import requests
 from core.browser_login import pkce, wait_for_redirect
 from core.common import DATA, money, num
 from core.db import connect, save_purchase
+from core.logins import alive, record
 
 KAUF = DATA / "kaufland"
 RAW = KAUF / "raw"
@@ -61,6 +62,7 @@ def login():
     if not user_id:
         raise SystemExit(f"Не нашёл id пользователя в ответе Kaufland: поля {list(info)}")
     save_token(tok, user_id)
+    record("kaufland")
     print("Вход в Kaufland выполнен. Токен сохранён в", TOKEN)
     print("ВАЖНО: token.json — доступ к твоему аккаунту Kaufland, никому не отдавай.")
 
@@ -69,6 +71,8 @@ def token_request(form: dict) -> dict:
     r = requests.post(f"{AUTH}/token-srv/token", data=form, timeout=30,
                       headers={"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"})
     if r.status_code != 200:
+        if form["grant_type"] == "refresh_token" and r.status_code in (400, 401):
+            record("kaufland", "expired")  # для «среднего срока жизни токена» на странице «Настройки»
         raise SystemExit(f"Kaufland не выдал токен ({r.status_code}): {r.text[:300]}\n"
                          f"Если вход устарел — python budget.py kaufland login")
     return r.json()
@@ -95,6 +99,7 @@ def session() -> tuple[str, str]:
                          "v": OAUTH_V})
     tok.setdefault("refresh_token", t["refresh_token"])
     save_token(tok, t["user_id"])
+    alive("kaufland")
     return tok["access_token"], t["user_id"]
 
 
@@ -106,6 +111,7 @@ def list_transactions() -> list[dict]:
         r = requests.get(url, params={"start": start, "limit": PAGE, "country": COUNTRY, "version": 2},
                          headers={**APP_HEADERS, "Authorization": f"Bearer {access}"}, timeout=60)
         if r.status_code == 401:
+            record("kaufland", "expired")
             raise SystemExit("Kaufland отклонил токен: python budget.py kaufland login")
         if r.status_code >= 400:
             raise SystemExit(f"Kaufland вернул {r.status_code}: {r.text[:300]}")

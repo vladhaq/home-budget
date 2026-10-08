@@ -110,6 +110,18 @@ def rule_text(t: dict) -> str:
     return " ".join(filter(None, [t.get("type"), t.get("counterparty"), desc]))
 
 
+def blik_ref(desc: str) -> str:
+    """Номер операции BLIK — в начале описания (дальше бывает адрес из выписки-файла); без ведущих нулей."""
+    m = re.match(r"\s*0*(\d{8,})", desc or "")
+    return m.group(1) if m else ""
+
+
+def blik_place(desc: str) -> str:
+    """Где платил BLIK — адрес из выписки-файла: «00000000000000001 http://www.example.nl/» -> «example.nl»."""
+    s = re.sub(r"^\s*\d{8,}\s*", "", desc or "")
+    return re.sub(r"^(https?://)?(www\.)?", "", s.strip(), flags=re.I).rstrip("/ ")
+
+
 def clean_desc(desc: str) -> str:
     """«WARSZAWASKLEP LIDL 1234PL» -> «SKLEP LIDL 1234»"""
     s = CITY_PREFIX.sub("", desc or "").strip()
@@ -135,9 +147,18 @@ def reconcile(verbose=True):
     return match(verbose)
 
 
-def refund_origin(con, t) -> dict | None:
+def brand(merchant: str | None) -> str:
+    """Магазин без адреса сайта и юрлица: «example.nl» и «Example» — один магазин."""
+    s = fold(merchant or "")
+    s = re.sub(r"^(https?://)?(www\.)?", "", s)
+    s = re.sub(r"\.(pl|nl|com|de|eu|net|org|co\.uk)\b.*$", "", s)
+    return re.sub(r"[^a-z0-9]", "", s)
+
+
+def refund_origin(con, t, merchant: str | None = None) -> dict | None:
     """Исходная покупка возврата на карту: за 90 дней до него — покупка той же суммы, иначе покупка с позицией
-    такой суммы (вернул один товар из заказа). Свой магазин, полное совпадение и найденные в банке — в приоритете."""
+    такой суммы (вернул один товар из заказа). Свой магазин, полное совпадение и найденные в банке — в приоритете.
+    По сумме не нашлось (вернул часть заказа со скидкой) — единственный заказ того же магазина за 60 дней."""
     amount = round(t["amount"], 2)
     cands = []
     for r in con.execute("""SELECT p.id, p.merchant, p.date, p.total, p.bank_tx_id, i.name,
@@ -152,6 +173,13 @@ def refund_origin(con, t) -> dict | None:
             same = t["merchant"] is not None and r["merchant"] == t["merchant"]
             cands.append(((same, whole, r["bank_tx_id"] is not None, r["date"]), r))
     if not cands:
+        b = brand(merchant or t.get("merchant"))
+        shop = [r for r in con.execute("""SELECT p.id, p.merchant, p.date, p.total FROM purchases p
+                                          WHERE p.total > ? AND date(p.date) BETWEEN date(?, '-60 day') AND date(?)""",
+                                       (amount - 0.01, t["date"], t["date"])) if b and brand(r["merchant"]) == b]
+        if len(shop) == 1:  # заказов этого магазина несколько — не угадываем
+            r = shop[0]
+            return {"id": r["id"], "item": f"часть заказа от {r['date'][8:10]}.{r['date'][5:7]}.{r['date'][2:4]}"}
         return None
     (_, whole, *_), r = max(cands, key=lambda c: c[0])
     more = f" и ещё {r['n'] - 1}" if whole and r["n"] > 1 else ""  # вернул весь заказ из нескольких товаров
@@ -262,9 +290,9 @@ def match(verbose=True):
             same_shop = t["merchant"] is not None and t["merchant"] == p["merchant"]
             if t["merchant"] and p["merchant"] and t["merchant"] != p["merchant"] and t["type"] == "CARD-PAYMENT":
                 continue  # оплата картой в другом магазине — точно не эта покупка
-            ref, desc = (p["pay_ref"] or "").lstrip("0"), (t["description"] or "").strip().lstrip("0")
-            exact = bool(ref) and desc == ref
-            if ref and re.fullmatch(r"\d{8,}", desc) and not exact:
+            ref, tref = (p["pay_ref"] or "").lstrip("0"), blik_ref(t["description"])
+            exact = bool(ref) and tref == ref
+            if ref and tref and not exact:
                 continue  # у операции BLIK свой номер, и он не этой покупки
             pairs.append(((exact, same_shop, -abs(delta), -diff), p, t))
     pairs.sort(key=lambda x: x[0], reverse=True)
@@ -397,8 +425,9 @@ def match(verbose=True):
             con.execute("UPDATE bank_tx SET category_id = ?, category_source = 'rule' WHERE id = ?", (cid, t["id"]))
             continue
         name = t["counterparty"] or clean_desc(t["description"] or "")
+        place = blik_place(t["description"]) if (t["type"] or "").startswith("MOBILE-PAYMENT-POS") else ""
         if t["type"] and t["type"].startswith("MOBILE-PAYMENT-POS"):
-            name = f"BLIK: {t['description']}"
+            name = f"BLIK: {place or t['description']}"
         if t["type"] in ("CARD-PAYMENT", "CARD-ATM"):
             name = clean_desc(t["description"] or "")
             if re.fullmatch(r"[\d\s]+", name):  # терминал без названия: «WROCLAW028PL» -> «028»
@@ -412,7 +441,7 @@ def match(verbose=True):
         method = {"CARD-PAYMENT": "card", "CARD-ATM": "card", "CARD-PAYMENT-RETURN": "card"}.get(
             t["type"], "blik" if (t["type"] or "").startswith("MOBILE-PAYMENT") else "transfer")
         pid = f"bank:{t['id']}"
-        merchant = t["merchant"] or (t["counterparty"] or clean_desc(t["description"] or ""))[:40]
+        merchant = t["merchant"] or (t["counterparty"] or place or clean_desc(t["description"] or ""))[:40]
         if re.fullmatch(r"[\d\s]*", merchant):  # у BLIK и части терминалов вместо магазина — номер операции
             merchant = "BLIK без названия" if (t["type"] or "").startswith("MOBILE-PAYMENT") else "Карта без названия"
         save_purchase(con, {"id": pid, "source": "bank", "date": t["date"] + "T12:00:00",
@@ -429,7 +458,7 @@ def match(verbose=True):
             refunds.append((pid, t))
         made += 1
     for pid, t in refunds:  # категорию даст исходная покупка (см. categorize)
-        if orig := refund_origin(con, t):
+        if orig := refund_origin(con, t, con.execute("SELECT merchant FROM purchases WHERE id = ?", (pid,)).fetchone()[0]):
             con.execute("UPDATE items SET name = ? WHERE purchase_id = ?", (f"Возврат: {orig['item']}"[:120], pid))
             # магазин — как у исходной покупки: фильтр по магазину показывает сумму за вычетом возврата
             con.execute("UPDATE purchases SET refund_of = ?, merchant = (SELECT merchant FROM purchases WHERE id = ?) "

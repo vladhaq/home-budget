@@ -18,12 +18,14 @@ from receipts.mail import db as mail_db
 
 AMT = r"(-?\d{1,3}(?:[ \u00a0]\d{3})*(?:[.,]\d{2})|-?\d+[.,]\d{2})"
 PLN_RX = re.compile(AMT + r"\s*(?:zł|PLN|zl)\b", re.I)
+PLN_PRE_RX = re.compile(r"(?:zł|PLN)\s*" + AMT + r"(?![\d.,])", re.I)  # «zł 76.99» — валюта впереди
+ONLY_AMT_RX = re.compile(r"(?:" + AMT + r"\s*(?:zł|PLN)|(?:zł|PLN)\s*" + AMT + r")\*?", re.I)  # строка — только сумма
 EUR_RX = re.compile(r"€\s?(\d+[.,]\d{2})|(\d+[.,]\d{2})\s?(?:€|EUR)")
 NBP_CACHE = DATA / "mail" / "nbp_rates.json"
 
 
 def amt(s: str):
-    m = PLN_RX.search(s or "")
+    m = PLN_RX.search(s or "") or PLN_PRE_RX.search(s or "")
     if not m:
         return None
     v = m.group(1).replace(" ", "").replace("\u00a0", "")
@@ -164,11 +166,11 @@ def parse_stripe(lines) -> dict | None:
 
 ORDER_RX = re.compile(r"(?:zam[oó]wieni[aeu]|order(?: number)?|nr|numer|numerze)\s*(?:nr\.?|no\.?|#|:)?\s*:?\s*([A-Z]{0,5}[-#]?\d[\w\-/]{3,})", re.I)
 TOTAL_LABELS = (r"^(łącznie|do zapłaty|razem|suma zamówienia|wartość zamówienia|kwota zamówienia|koszt całkowity|całkowita kwota"
-                r"|suma \(razem|suma łączna|total|amount paid|kwota(?! vat))\b")
+                r"|suma \(razem|suma razem|suma łączna|total|amount paid|kwota(?! vat))\b")
 DISCOUNT_LABELS = r"^(zniżka|rabat|kod promocyjny|kupon|discount)\b"
 FINAL_LABELS = r"^(łącznie|do zapłaty|razem do zapłaty|amount paid)\b"  # итог к оплате важнее «стоимости заказа»
 FEE_LABELS = r"^(koszt (obsługi )?płatności|opłata za (płatność|pobranie)|koszt pobrania)\s*:?$"
-DELIVERY_LABELS = r"(koszt[y]? (dostawy|transportu|wysyłki)|dostawa|dostawa i płatność|wysyłka|przesyłka)\s*:?$"
+DELIVERY_LABELS = r"(koszt[y]? (dostawy|transportu|wysyłki)|dostawa|dostawa i płatność|wysyłka|przesyłka|shipping( fee)?|delivery fee)\s*:?$"
 
 
 def find_order(lines, subject) -> str | None:
@@ -177,6 +179,8 @@ def find_order(lines, subject) -> str | None:
     for src in [subject] + lines[:60] + pairs:
         if m := ORDER_RX.search(src):
             return m.group(1).strip("#")
+    if m := re.search(r"\b([A-Z]{2,5}-\d{5,})\b", subject or ""):
+        return m.group(1)
     return None
 
 
@@ -236,20 +240,60 @@ def idosell_items(lines) -> list[dict]:
     return out
 
 
+SIZE_RX = r"(XXS|XS|S|M|L|XL|XXL|XXXL|\d{2}([.,]5)?|W\d{2}(L\d{1,2})?|EU ?\d{2}([.,]5)?|\d{2,3}/\d{2,3}|ONE SIZE|OS)"
+
+
+def columns_to_rows(lines: list[str]) -> list[str]:
+    """Итоги в две колонки (некоторые магазины одежды): сначала подписи «Suma częściowa / Kupon: / KOD30 / Wysyłka / Suma razem»,
+    потом столько же сумм — склеиваем в строки «подпись сумма», дальше их понимает обычный разбор.
+    Подпись с «:» в конце забирает следующую строку (код купона). Результат — пары строк «подпись» / «сумма»."""
+    is_amt = lambda s: ONLY_AMT_RX.fullmatch(s.strip()) is not None
+    out, n = [], 0
+    while n < len(lines):
+        vals = 0
+        while n + vals < len(lines) and is_amt(lines[n + vals]):
+            vals += 1
+        if vals >= 3:  # столбик сумм: перед ним — столько же подписей (с кодом купона — на строку больше)?
+            labels, k = [], len(out) - 1
+            while k >= 0 and len(labels) < vals * 2 and not is_amt(out[k]) and amt(out[k]) is None and len(out[k]) < 40:
+                labels.insert(0, k)
+                k -= 1
+            merged = []
+            for i in labels:
+                if merged and out[merged[-1][-1]].rstrip().endswith(":") and len(merged[-1]) == 1:
+                    merged[-1].append(i)
+                else:
+                    merged.append([i])
+            if len(merged) > vals:
+                merged = merged[-vals:]
+            if len(merged) == vals:
+                start = merged[0][0]
+                rows = [x for j, g in enumerate(merged) for x in (" ".join(out[i].strip() for i in g), lines[n + j].strip())]
+                out = out[:start] + rows
+                n += vals
+                continue
+        out.append(lines[n])
+        n += 1
+    return out
+
+
 def qty_items(lines) -> list[dict]:
     """Zalando, Modivo: «марка» / «название» / «Rozmiar: M» / «Ilość: 1» (или «Ilość:» / «1») / «135,95 zł».
     Название — до двух строк перед количеством, без размеров/цветов и кодов товара."""
     out = []
     for n, ln in enumerate(lines):
-        m = re.match(r"^(?:Quantity|Ilość)\s*:\s*(\d+)?\s*$", ln.strip(), re.I)
+        m = re.match(r"^(?:(?:Quantity|Ilość)\s*:\s*(\d+)?|(\d{1,2})\s*[x×])\s*$", ln.strip(), re.I)
         if not m:
             continue
-        k, qty = n + 1, m.group(1)
+        k, qty = n + 1, m.group(1) or m.group(2)
         if qty is None and k < len(lines) and re.fullmatch(r"\d+", lines[k].strip()):
             qty, k = lines[k].strip(), k + 1
         if k < len(lines) and lines[k].strip().startswith("Dostępność"):  # «Dostępność:» / «W magazynie»
             k += 2 if lines[k].strip().endswith(":") else 1
-        if qty is None or k >= len(lines) or not re.fullmatch(AMT + r"\s*(?:zł|PLN)", lines[k].strip(), re.I):
+        while k < len(lines) and k <= n + 4 and re.match(r"^(Size|Rozmiar|Kolor|Colou?r|Your price|Cena|SCD)\b.*:|.*:$",
+                                                          lines[k].strip(), re.I):
+            k += 1  # «Size: W30», «Your price:», «SCD:» — подписи, не цена
+        if qty is None or k >= len(lines) or not ONLY_AMT_RX.fullmatch(lines[k].strip()):
             continue
         name, j = [], n - 1
         attr = r"^(Size|Rozmiar|Kolor|Colou?r)[^:]*:"
@@ -257,10 +301,12 @@ def qty_items(lines) -> list[dict]:
             s = lines[j].strip()
             if re.match(attr, s, re.I) or j and re.match(attr + r"\s*$", lines[j - 1].strip(), re.I):
                 pass           # «Size: S» или «Rozmiar odzieży:» / «S» — размер, не название
-            elif re.fullmatch(r"\d{6,}", s):
-                pass           # код товара
-            elif ":" in s or re.search(r"\b20\d\d\b", s) or amt(s) is not None or re.fullmatch(TABLE_HEAD, s, re.I):
-                break          # метка заказа, дата доставки, цена прошлого товара, заголовок таблицы — блок товара кончился
+            elif re.fullmatch(r"\d{6,}", s) or re.fullmatch(SIZE_RX, s, re.I):
+                pass           # код товара, размер
+            elif ":" in s or re.search(r"\b20\d\d\b", s) or amt(s) is not None or re.fullmatch(TABLE_HEAD, s, re.I) \
+                    or re.fullmatch(r"(zamówione produkty|produkty|twoje (artykuły|produkty|zamówienie)|szczegóły zamówienia"
+                                    r"|order details|your items|products?|items?)", s, re.I):
+                break          # метка заказа, дата, цена прошлого товара, заголовок таблицы или списка — блок товара кончился
             else:
                 name.insert(0, s)
             j -= 1
@@ -294,6 +340,7 @@ def row_items(lines) -> list[dict]:
 
 
 def parse_generic(lines, subject) -> dict | None:
+    lines = columns_to_rows(lines)
     order = find_order(lines, subject)
     items, n = [], 0
     while n < len(lines):  # «Название» + «1 x 15.49 zł»  /  «Ilość : 1x» + «Cena za sztukę : 1199.00 zł»
@@ -344,6 +391,14 @@ def parse_generic(lines, subject) -> dict | None:
             items[-1]["discount"] = round(left, 2)
         items += [{"name": n, "product_code": None, "qty": 1, "unit_price": v, "amount": v, "discount": None}
                   for n, v in fit if n != "Скидка"]
+        gap = round(base - total, 2)
+        if not fit and any(n == "Скидка" for n, _ in extras) and 0 < gap < base * 0.6:
+            # купон в письме есть, но с итогом не сходится — к оплате итог (его и списал банк): разница скидкой
+            left = gap
+            for i in items[:-1]:
+                i["discount"] = round(gap * i["amount"] / base, 2)
+                left -= i["discount"]
+            items[-1]["discount"] = round(left, 2)
     payment, pay_line = pay_after_label(lines)
     if total is None and not items:
         return None
@@ -500,6 +555,15 @@ def parse_all(verbose=True):
         elif score(o) > score(twin[1]):
             merged[merged.index(twin)] = (twin[0], o | {"date": twin[1]["date"]})
     orders = dict(merged)
+    # продавец с Allegro пишет и сам, через allegromail.pl («Dziękujemy za zakup»): это тот же заказ, что в письме
+    # Allegro (та же сумма в пределах трёх дней) — второй покупкой его не считаем
+    total_of = lambda o: o.get("total") if o.get("total") is not None else         (round(sum(i["amount"] or 0 for i in o["items"]), 2) if o.get("items") else None)  # у Allegro итог — по позициям
+    allegro = [(total_of(o), o["date"]) for (d, _), o in orders.items() if d == "allegro.pl" and total_of(o) is not None]
+    for key in [k for k, o in orders.items() if k[0] == "allegromail.pl" and total_of(o) is not None]:
+        o = orders[key]
+        if any(abs(tot - total_of(o)) < 0.01 and abs((dt.datetime.fromisoformat(d[:19]) -
+                                                     dt.datetime.fromisoformat(o["date"][:19])).days) <= 3 for tot, d in allegro):
+            del orders[key]
 
     for key, o in orders.items():
         o["payment"] = o.get("payment") or pay_hints.get(key)

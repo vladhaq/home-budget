@@ -87,7 +87,8 @@ async function importStatements(files) {
   try {
     const res = await post("/api/bank/import", {files: await Promise.all([...files].map(async f => ({name: f.name, data: await toB64(f)})))});
     const lines = res.results.map(r => r.error ? `✗ ${r.error}`
-      : `${r.file}: ${r.format}, ${r.account}, ${ddmmyy(r.from)}–${ddmmyy(r.to)} — новых ${r.new}, уже были ${r.dup}`);
+      : `${r.file}: ${r.format}, ${r.account}, ${ddmmyy(r.from)}–${ddmmyy(r.to)} — новых ${r.new}, уже были ${r.dup}` +
+        (r.enriched ? `, дополнено подробностями ${r.enriched}` : ""));
     toast(lines.join("\n"), {ms: 9000});
     BANK = null; WALLET = null; await load();
   } catch (e) { toast("Не получилось: " + e.message); }
@@ -96,8 +97,8 @@ async function renderBank() {
   const main = document.getElementById("main");
   if (!BANK) BANK = await (await fetch("/api/bank")).json();
   if (BANK.empty || !Object.keys(BANK.balance).length) {
-    main.innerHTML = `<div class="empty">Выписка ещё не загружена. Подключить банк: python budget.py bank login, затем
-      python budget.py bank sync (см. README) — или загрузить выписку из файла:</div>${importBox()}`; return;
+    main.innerHTML = `<div class="empty">Выписка ещё не загружена. Подключить банк — на странице «Настройки»: «войти» и
+      «обновить» в строке «Выписка PKO» (см. README) — или загрузить выписку из файла:</div>${importBox()}`; return;
   }
   bankCharts.forEach(c => c.destroy()); bankCharts = [];
   const F = S.F, inRange = m => (!F.from || m >= F.from) && (!F.to || m <= F.to);
@@ -122,14 +123,17 @@ async function renderBank() {
   main.innerHTML = `
     ${importBox()}
     <div class="cards">
-      <div class="card">остаток на счёте<b>${zl(lastBal)}</b>на ${esc(BANK.last || "")}</div>
+      ${BANK.now ? `<div class="card">доступно на счёте<b>${zl(BANK.now.amount)}</b>${BANK.now.blocked > 0
+          ? `заблокировано ${zl(BANK.now.blocked)} — покупки, которые банк ещё не провёл; по выписке ${zl(BANK.now.booked)}`
+          : `на ${ddmmyy(BANK.now.date)}`}</div>`
+        : `<div class="card">остаток на счёте<b>${zl(lastBal)}</b>на ${esc(BANK.last || "")}</div>`}
       <div class="card">доходы за период<b class="save">${zl(totInc)}</b>в месяц ${zl(totInc / (months.length || 1))}</div>
       <div class="card">расходы со счёта PKO<b>${zl(pkoSp)}</b>в месяц ${zl(pkoSp / (months.length || 1))}</div>
       <div class="card">трат PKO подтверждено чеками<b>${(rec / (pkoSp || 1) * 100).toFixed(0)}%</b>с арендой, учёбой, налогами</div>
       <div class="card">покупок подтверждено чеками<b>${(shopRec / (shopAll || 1) * 100).toFixed(0)}%</b>без аренды, учёбы, налогов, комиссий</div>
       <div class="card">другой картой/счётом<b>${zl(other)}</b>по чекам, в выписке PKO их нет</div>
       <div class="card">наличные<b>${zl(atm)}</b>снято; в чеках за наличные ${zl(cash)}</div>
-      <div class="card">доступ к банку<b>${BANK.valid_until ? BANK.valid_until.slice(0, 10) : "—"}</b>потом: bank login</div>
+      <div class="card">доступ к банку<b>${BANK.valid_until ? BANK.valid_until.slice(0, 10) : "—"}</b>продлить: «Настройки» → «обновить токен»</div>
     </div>
     <h2>Баланс</h2><div class="chartbox"><canvas id="bal" height="90"></canvas></div>
     <h2>Доходы и расходы по месяцам</h2>

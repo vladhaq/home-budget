@@ -181,14 +181,22 @@ def occurrences(r: dict, until: dt.date) -> list[dt.date]:
 
 # ---------------------------------------------------------------- календарь и остаток на счёте
 
+def bank_now(con) -> dict | None:
+    """Остаток всех счетов сейчас: amount — доступно (без заблокированных покупок, которые банк ещё не провёл),
+    booked — по выписке, blocked — разница. У счетов из файлов блокировок не видно: booked = amount."""
+    rows = [json.loads(r["value"]) for r in con.execute("SELECT value FROM meta WHERE key LIKE 'bank_balance:%'")]
+    if not rows:
+        return None
+    amount = sum(float(b["amount"]) for b in rows)
+    booked = sum(float(b.get("booked", b["amount"])) for b in rows)
+    return {"amount": round(amount, 2), "booked": round(booked, 2), "blocked": round(booked - amount, 2),
+            "date": max(b["date"] for b in rows)}
+
+
 def bank_balance(con) -> tuple[float | None, str | None]:
-    total, date = 0.0, None
-    rows = con.execute("SELECT value FROM meta WHERE key LIKE 'bank_balance:%'").fetchall()
-    for r in rows:
-        b = json.loads(r["value"])
-        total += float(b["amount"])
-        date = max(date or b["date"], b["date"])
-    return (round(total, 2), date) if rows else (None, None)
+    """Доступный остаток (для прогноза и «наличные + карта») и на какую дату."""
+    n = bank_now(con)
+    return (n["amount"], n["date"]) if n else (None, None)
 
 
 def calendar(con, rec: list[dict], horizon_days: int = 45) -> dict:

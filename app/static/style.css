@@ -324,7 +324,16 @@ tr:hover .mini, summary:hover .mini, .mini:focus-visible { opacity: 1; }
   padding: 7px 10px; border: 0; border-radius: 10px; background: none; text-align: left; cursor: pointer; transition: background-color .15s; }
 .dleg:hover:not(:disabled) { background: var(--hover); } .dleg:disabled { cursor: default; }
 .dleg i { width: 12px; height: 12px; border-radius: 50%; background: var(--c); box-shadow: 0 0 10px var(--c); }
-.dleg span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dleg span { line-height: 1.25; overflow-wrap: break-word; }  /* длинное название — в две строки, а не «Образова…» */
+/* два кольца рядом (расходы и поступления): кольца поменьше — легенде место под названия */
+.donutbox:has(.donut + .donut) .donut { grid-template-columns: minmax(170px, 220px) minmax(0, 1fr); gap: 8px 16px; }
+.donutbox:has(.donut + .donut) .dwrap { height: 220px; }
+.donutbox:has(.donut + .donut) .dcenter b { font-size: 19px; }
+/* доля под мышью — в центре кольца: название с цветной точкой, сумма, процент */
+.dcenter { max-width: 64%; margin: auto; }
+.dcenter .dname { display: inline-flex; align-items: center; justify-content: center; gap: 6px; color: var(--text); font-weight: 600;
+  line-height: 1.2; text-wrap: balance; }
+.dcenter .dname i { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--c); box-shadow: 0 0 8px var(--c); }
 .dleg b { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .dleg em { font-style: normal; color: var(--text-2); text-align: right; font-variant-numeric: tabular-nums; }
 .ovbar .tabs { margin: 0; }
@@ -390,6 +399,8 @@ tr.fresh > td { animation: drop .3s var(--ease); }
 @keyframes pop { from { opacity: 0; transform: scale(.3); } 60% { transform: scale(1.15); } }
 @keyframes grow { from { transform: scaleX(0); } }
 @keyframes spin { to { transform: rotate(360deg); } }
+ul.notes { margin: 6px 0 4px; padding-left: 20px; font-size: 13.5px; line-height: 1.5; } ul.notes li { margin: 3px 0; }
+.tok { min-width: 215px; margin: 3px 0 6px; color: var(--text-2); font-size: 12.5px; line-height: 1.45; }  /* «Настройки»: дата входа и срок токена */
 @keyframes ripple { to { opacity: 0; transform: scale(1); } }
 @keyframes breathe { 50% { transform: scale(1.07); } }
 @keyframes bar-in { from { opacity: 0; transform: translate(-50%, 30px); } }
