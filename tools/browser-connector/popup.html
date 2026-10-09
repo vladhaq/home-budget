@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Подключение Biedronka</title>
+<style>
+  body { width: 320px; margin: 0; padding: 16px; color: #242424; font: 14px/1.45 system-ui, sans-serif; }
+  h1 { margin: 0 0 8px; font-size: 18px; }
+  p { margin: 8px 0; }
+  button { box-sizing: border-box; width: 100%; padding: 9px; }
+  button { border: 0; border-radius: 5px; background: #d71920; color: white; cursor: pointer; font-weight: 600; }
+  button:disabled { opacity: .6; cursor: wait; }
+  #status { min-height: 1.5em; overflow-wrap: anywhere; }
+</style>
+<h1>Moja Biedronka</h1>
+<p>Убедись, что в этом Chrome открыт аккаунт Moja Biedronka.</p>
+<button id="transfer">Подключить к бюджету</button>
+<p id="status" role="status"></p>
+<script src="popup.js"></script>
+</html>

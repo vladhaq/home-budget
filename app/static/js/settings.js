@@ -1,5 +1,7 @@
 // Страница «Настройки»: обновление, источники, автозапуск, журнал.
 // ---------- настройки: обновление данных, источники, автозапуск, журнал
+let BIEDRONKA_EXTENSION = null, BIEDRONKA_EXTENSION_CHECKING = false;
+let BIEDRONKA_SESSION = null, BIEDRONKA_SESSION_CHECKING = false;
 let UPD = null, SCHED = null, updTimer = null, UPD_WAIT = null, loginTimer = null, LOGIN_WAIT = null;
 let UPG = null, upgTimer = null;  // новая версия программы: результат проверки, ход установки
 const UST = {ok: ["✓", "--green", "готово"], warn: ["!", "--orange", "внимание"], off: ["!", "--orange", "не настроено"],
@@ -30,7 +32,32 @@ function tokenInfo(s) {
       : "— ещё не истекал"}</div>`;
 }
 
+function checkBiedronkaExtension() {
+  if (BIEDRONKA_EXTENSION !== null || BIEDRONKA_EXTENSION_CHECKING) return;
+  BIEDRONKA_EXTENSION_CHECKING = true;
+  const deadline = Date.now() + 2000;
+  const check = () => {
+    if (document.getElementById("home-budget-biedronka-extension")) {
+      BIEDRONKA_EXTENSION = true;
+      BIEDRONKA_EXTENSION_CHECKING = false;
+      if (S.page === "settings") drawSettings();
+      return;
+    }
+    if (Date.now() < deadline) {
+      setTimeout(check, 100);
+    } else {
+      BIEDRONKA_EXTENSION_CHECKING = false;
+      BIEDRONKA_EXTENSION = false;
+      if (S.page === "settings") drawSettings();
+    }
+  };
+  check();
+}
+
 async function renderSettings() {
+  BIEDRONKA_SESSION = null;
+  checkBiedronkaExtension();
+  checkBiedronkaSession();
   if (!UPD) UPD = await (await fetch("/api/update")).json();
   if (loginRunning() && !LOGIN_WAIT) { LOGIN_WAIT = UPD.login.key; pollLogin(); }  // вход начат до перезагрузки страницы
   if (!SCHED) {
@@ -38,6 +65,23 @@ async function renderSettings() {
     fetch("/api/update/schedule").then(r => r.json()).then(s => { SCHED = s; if (S.page === "settings") drawSettings(); });
   }
   drawSettings();
+}
+async function checkBiedronkaSession() {
+  if (BIEDRONKA_SESSION !== null || BIEDRONKA_SESSION_CHECKING) return;
+  BIEDRONKA_SESSION_CHECKING = true;
+  try {
+    const response = await fetch("/api/biedronka/session-status");
+    const result = await response.json();
+    if (!response.ok || !["valid", "missing", "expired", "unavailable"].includes(result.status)) {
+      throw new Error("Unexpected Biedronka session status response");
+    }
+    BIEDRONKA_SESSION = result.status;
+  } catch {
+    BIEDRONKA_SESSION = "unavailable";
+  } finally {
+    BIEDRONKA_SESSION_CHECKING = false;
+    if (S.page === "settings") drawSettings();
+  }
 }
 function drawSettings() {
   const main = document.getElementById("main"), last = UPD.runs[0], run = updRunning();
@@ -60,6 +104,19 @@ function drawSettings() {
       резервная копия. Обычно 1–2 минуты. Ошибка одного источника не останавливает остальные.
       Входы (логины, пароли) обновление не запрашивает — если вход в Lidl, Kaufland или банк устарел, нажми
       «обновить токен» в строке источника.</p>
+
+    ${BIEDRONKA_SESSION === "missing" || BIEDRONKA_SESSION === "expired" ? `
+      <h2>Подключение Biedronka</h2>
+      <div class="updbox">
+        ${BIEDRONKA_EXTENSION === false ? `<div class="muted">Расширение «Budget Browser Connector» не обнаружено. В Chrome открой
+          <code>chrome://extensions</code>, включи «Режим разработчика» и выбери «Загрузить распакованное расширение»,
+          указав папку <code>C:\\LB\\budget\\tools\\browser-connector</code>.</div>` : ""}
+        <div><b>${BIEDRONKA_SESSION === "expired" ? "Сессия Moja Biedronka истекла" : "Biedronka ещё не подключена"}</b>
+          <div class="muted">Войди в Moja Biedronka, нажми значок расширения «Budget Browser Connector» и кнопку «Подключить к бюджету».
+            Cookies передаются только этому приложению на этом компьютере.</div></div>
+      </div>
+      ` : ""}
+    ${BIEDRONKA_SESSION === "unavailable" ? `<p class="muted">Не удалось проверить сессию Biedronka: сайт временно недоступен. Попробуй позже.</p>` : ""}
 
     <h2>Источники</h2>
     <table><tr><th>источник</th><th>подключение</th><th>успешно обновлено</th><th>данные по</th><th>последний результат</th><th></th></tr>` +

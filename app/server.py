@@ -3,6 +3,7 @@ import datetime as dt
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -21,6 +22,8 @@ STATIC = BUDGET / "app" / "static"
 
 
 ALLOWED_HOSTS = {f"{HOST}:{PORT}", f"localhost:{PORT}"}
+BIEDRONKA_PAIRING_LOCK = threading.Lock()
+BIEDRONKA_PAIRING: tuple[str, float] | None = None
 
 
 @app.before_request
@@ -31,6 +34,19 @@ def local_only():
         return "нет доступа", 403
     if request.method == "POST" and not request.is_json:
         return jsonify(ok=False, error="ожидается JSON"), 415
+
+
+@app.after_request
+def extension_cors(response):
+    """Allow only Chrome extensions to call the local session-bridge endpoints."""
+    origin = request.headers.get("Origin", "")
+    if (request.path.startswith("/api/biedronka/session-transfer")
+            and re.fullmatch(r"chrome-extension://[a-p]{32}", origin)):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Vary"] = "Origin"
+    return response
 
 
 @app.get("/")
@@ -643,6 +659,66 @@ def update_run():
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return jsonify(ok=True)
+
+
+@app.get("/api/biedronka/session-status")
+def biedronka_session_status():
+    import requests
+    from receipts import biedronka
+
+    if not biedronka.SESSION.exists():
+        return jsonify(status="missing")
+    try:
+        session = biedronka._load_session()
+        if session is None:
+            return jsonify(status="missing")
+        biedronka.verify_session(session, timeout=8)
+    except biedronka.BiedronkaSessionExpired:
+        return jsonify(status="expired")
+    except requests.RequestException:
+        return jsonify(status="unavailable")
+    return jsonify(status="valid")
+
+
+@app.post("/api/biedronka/session-transfer/start")
+def biedronka_session_transfer_start():
+    """Create a short-lived, single-use secret for the local Chrome extension."""
+    global BIEDRONKA_PAIRING
+    token = secrets.token_urlsafe(32)
+    with BIEDRONKA_PAIRING_LOCK:
+        BIEDRONKA_PAIRING = (token, time.monotonic() + 300)
+    return jsonify(ok=True, token=token, expires_in=300)
+
+
+@app.post("/api/biedronka/session-transfer")
+def biedronka_session_transfer():
+    """Accept Chrome cookies only after a user-initiated local pairing."""
+    import requests
+
+    global BIEDRONKA_PAIRING
+    if request.content_length is not None and request.content_length > 512 * 1024:
+        return jsonify(ok=False, error="Данные сессии превышают допустимый размер"), 413
+    body = request.get_json()
+    if not isinstance(body, dict) or not isinstance(body.get("token"), str):
+        return jsonify(ok=False, error="Некорректный запрос подключения"), 400
+
+    with BIEDRONKA_PAIRING_LOCK:
+        pending = BIEDRONKA_PAIRING
+        if (not pending or pending[1] <= time.monotonic()
+                or not secrets.compare_digest(pending[0], body["token"])):
+            return jsonify(ok=False, error="Код подключения истёк или уже использован"), 403
+        BIEDRONKA_PAIRING = None
+
+    from receipts import biedronka
+    try:
+        session = biedronka.session_from_extension(body.get("user_agent"), body.get("cookies"))
+        biedronka.verify_session(session)
+        biedronka._save_session(session)
+    except (ValueError, biedronka.BiedronkaSessionExpired) as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    except requests.RequestException:
+        return jsonify(ok=False, error="Не удалось проверить cookies на сайте Biedronka"), 502
+    return jsonify(ok=True, cookies=len(session.cookies))
 
 
 @app.post("/api/update/schedule")

@@ -59,3 +59,44 @@ def test_easyocr_spacing_and_letter_o():  # «15 ,98C», «~4,Ooc», «SUHA PLN 
     easy = KAUFLAND.replace("15,98C", "15 ,98C").replace("-4,00C", "~4,Ooc").replace("SUMA PLN 30,20", "SUHA PLN 30 20")
     r = merge([parse_text(easy)])
     assert r["total"] == 30.2 and r["status"] == "ok" and rows(r)[2] == ("Pieczywo żytnie 260g", 15.98, 4.0)
+
+
+def test_biedronka_discount_amount_on_next_line():
+    text = """Biedronka
+25.08.2025 07:53
+NIEFISKALNY
+Nazwa PTU Ilość Cena Wartość
+Listki z cukrem 400g C 1.000 x 8,99 8,99
+Mielone wp szyn 500g C 1.000 x 11,99 11,99
+Rabat
+-6,40
+5,59
+SUMA PLN 14,58
+Płatność kartą 14,58
+"""
+    result = merge([parse_text(text)])
+    assert result["status"] == "ok" and result["date"] == "2025-08-25T07:53:00"
+    assert rows(result) == [("Listki z cukrem 400g", 8.99, None), ("Mielone wp szyn 500g", 11.99, 6.4)]
+    assert result["payment"] == "card"
+
+
+def test_biedronka_store_uses_branch_label_not_legal_company_address():
+    result = parse_text("""Biedronka
+Sklep 1712 CHOCIMSKA 7
+Jeronimo Martins Polska S. A.
+ul. Żniwna 5, 62-025 Kostrzyn
+NIP 779-10-11-327
+22.03.2025 16:22
+NIEFISKALNY
+""")
+    assert result["merchant"] == "Biedronka"
+    assert result["store"] == "Sklep 1712 CHOCIMSKA 7"
+
+
+def test_unpriced_discount_does_not_consume_receipt_total():
+    result = parse_text("""Biedronka
+Jabłka 1 x 5,00 5,00C
+Rabat
+SUMA PLN 5,00
+""")
+    assert result["items"][0]["amount"] == 5.0 and result["items"][0]["discount"] is None
