@@ -253,12 +253,23 @@ def step_reconcile(con):
     return "ok", ", ".join(parts)
 
 
+def step_biedronka_flyers(con):
+    """Газетки Biedronka: новые — скачать и распознать (каждая страница один раз, ~2–4 с), закончившиеся — убрать."""
+    from core import biedronka_deals as B
+    done = {p.name for p in B.OCR_DIR.glob("*.json")}
+    idx = B.update(verbose=True)
+    new = len({p.name for p in B.OCR_DIR.glob("*.json")} - done)
+    return "ok", f"газеток: {len(idx['flyers'])}" + (f", распознано новых страниц: {new}" if new else ", новых нет")
+
+
 def step_deals(con):
     from core import deals, stores
     if not stores.deal_stores():
         raise Skip("магазины с газетками выключены в «Настройках» → «Магазины»")
+    on = [stores.STORES[k][0] for k in stores.deal_stores()]
+    names = ", ".join(on[:-1]) + " и " + on[-1] if len(on) > 1 else on[0]
     r = deals.auto()
-    summary = f"газеток Lidl и Kaufland: {r['flyers']}, акций на постоянные позиции: {r['deals']}"
+    summary = f"газеток {names}: {r['flyers']}, акций на постоянные позиции: {r['deals']}"
     if r.get("errors"):
         summary += f"; не скачалось: {'; '.join(r['errors'])}"
     if r["reminded"]:
@@ -300,11 +311,31 @@ STEPS = [
     ("photos", "Папка receipts/inbox", step_photos),
     ("bank", "Выписка PKO", step_bank),
     ("reconcile", "Сверка и категории", step_reconcile),
+    ("biedronka_flyers", "Газетки Biedronka (распознавание)", step_biedronka_flyers),
     ("deals", "Газетки Lidl и Kaufland, напоминания", step_deals),
     ("backup", "Резервная копия", step_backup),
 ]
 TITLES = {k: t for k, t, _ in STEPS}
-NETWORK = {"lidl", "kaufland", "biedronka", "mail", "telegram", "bank", "deals"}
+NETWORK = {"lidl", "kaufland", "biedronka", "biedronka_flyers", "mail", "telegram", "bank", "deals"}
+STEP_STORE = {"lidl": "lidl", "kaufland": "kaufland", "biedronka": "biedronka", "biedronka_flyers": "biedronka"}
+ALWAYS = {"reconcile"}  # без сверки новые покупки не видны — из «Обновить всё» не выключается
+
+
+def skipped(con) -> set[str]:
+    """Шаги, выключенные в «Настройках» → «Источники» из «Обновить всё» и автозапуска (вручную «обновить» — работает)."""
+    from core.db import get_meta
+    return set(json.loads(get_meta(con, "update_skip") or "[]")) - ALWAYS
+
+
+def set_skipped(key: str, skip: bool):
+    from core.db import get_meta
+    if key not in TITLES or key in ALWAYS:
+        raise ValueError(f"этот шаг не выключается: {key}")
+    con = db()
+    cur = set(json.loads(get_meta(con, "update_skip") or "[]"))
+    cur = cur | {key} if skip else cur - {key}
+    set_meta(con, "update_skip", json.dumps(sorted(cur)))
+    con.commit()
 
 
 # ---------------------------------------------------------------- запуск
@@ -425,7 +456,8 @@ def run(trigger: str = "manual", only: list[str] | None = None) -> int | None:
     mark_dead(con)
     from core import stores
     on = stores.enabled(con)  # выключенный в «Настройках» магазин не обновляется
-    steps = [s for s in STEPS if (not only or s[0] in only) and on.get(s[0], True)]
+    skip = skipped(con) if not only else set()  # выключенный из «Обновить всё» шаг — только вручную
+    steps = [s for s in STEPS if (not only or s[0] in only) and on.get(STEP_STORE.get(s[0], ""), True) and s[0] not in skip]
     if only and set(only) & {"lidl", "kaufland", "biedronka", "mail", "telegram", "photos", "bank"} and "reconcile" not in only:
         steps.append(next(s for s in STEPS if s[0] == "reconcile"))  # новые покупки без сверки и категорий не видны
     cur = con.execute("INSERT INTO update_runs (started, trigger, steps) VALUES (?, ?, ?)",
@@ -554,6 +586,7 @@ def sources(con) -> list[dict]:
         "reconcile": (True, None, None,
                       f"неопознанных позиций: {count(con, 'SELECT count(DISTINCT lower(name)) FROM items WHERE category_id IS NULL')}"),
         "deals": deals_source(),
+        "biedronka_flyers": biedronka_flyers_source(),
         "backup": (bool(keyring.get_password(backup.KEYRING_SERVICE, backup.KEYRING_USER)),
                    "python budget.py backup password",
                    dt.datetime.fromtimestamp(bk.stat().st_mtime).isoformat(timespec="minutes") if bk else None,
@@ -562,8 +595,9 @@ def sources(con) -> list[dict]:
     out = []
     from core import stores
     on = stores.enabled(con)
+    skip = skipped(con)
     for key, title, _ in STEPS:
-        if not on.get(key, True):  # выключенный магазин — не в списке источников
+        if not on.get(STEP_STORE.get(key, ""), True):  # выключенный магазин — не в списке источников
             continue
         ready, setup, data_date, note = info[key]
         warn = None
@@ -572,10 +606,20 @@ def sources(con) -> list[dict]:
         missing = {"telegram": "нет первого входа", "backup": "пароль не задан",
                    "bank": "доступ истёк" if enablebanking.SESSION.exists() else "не подключено"}.get(key, "не подключено")
         out.append({"key": key, "title": title, "ready": ready, "setup": setup, "data": data_date, "note": note,
-                    "warn": warn, "missing": missing, "always": key in ("photos", "reconcile"),
+                    "warn": warn, "missing": missing, "always": key in ("photos", "reconcile", "biedronka_flyers"),
+                    "auto": key not in skip, "fixed": key in ALWAYS,
                     "token": logins.state(con, key) if key in logins.SOURCES else None,
                     "last": last(key), "last_ok": last(key, ok_only=True)})
     return out
+
+
+def biedronka_flyers_source():
+    """Строка «Газетки Biedronka»: (готово, команда настройки, данные по, пояснение)."""
+    from core import biedronka_deals as B
+    idx = B.load_json(B.INDEX, None) if B.INDEX.exists() else None
+    n = len(idx["flyers"]) if idx else 0
+    return True, None, (idx or {}).get("updated"), \
+        (f"газеток: {n}" if idx else "ещё не распознавались") + " · с картинок — цены могут быть неточными"
 
 
 def deals_source():
@@ -585,8 +629,8 @@ def deals_source():
         s, tg = deals.summary(), deals.telegram_state()
     except Exception as e:  # noqa: BLE001
         return False, None, None, f"модуль скидок не загрузился: {e}"
-    st = s.get("stores", {})
-    note = (f"газеток Lidl: {st.get('lidl', {}).get('flyers', 0)}, Kaufland: {st.get('kaufland', {}).get('flyers', 0)}"
+    from core import stores
+    note = ("газеток " + ", ".join(f"{stores.STORES[k][0]}: {v['flyers']}" for k, v in s.get("stores", {}).items())
             + ("" if tg["ready"] else "; напоминания — после входа в Telegram"))
     return True, None if tg["ready"] else "python budget.py telegram", (s["updated"] or "")[:16] or None, note
 

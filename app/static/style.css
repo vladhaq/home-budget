@@ -399,6 +399,16 @@ tr.fresh > td { animation: drop .3s var(--ease); }
 @keyframes pop { from { opacity: 0; transform: scale(.3); } 60% { transform: scale(1.15); } }
 @keyframes grow { from { transform: scaleX(0); } }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* переключатель (вкл/выкл) */
+.switch { position: relative; display: inline-block; width: 34px; height: 20px; cursor: pointer; vertical-align: middle; }
+.switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+.switch span { position: absolute; inset: 0; border-radius: 10px; background: var(--panel-3); transition: background .15s; }
+.switch span::before { content: ""; position: absolute; left: 3px; top: 3px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--text-2); transition: transform .15s, background .15s; }
+.switch input:checked + span { background: var(--accent); } .switch input:checked + span::before { transform: translateX(14px); background: #fff; }
+.switch input:disabled + span { opacity: .5; cursor: default; }
+tr.off > td:not(:first-child) { opacity: .55; }
+.warnbox { border-left: 3px solid var(--orange); }
 /* «Настройки»: сворачиваемые разделы, магазины */
 details.sect { margin: 14px 0 4px; background: none; box-shadow: none; border-radius: 0; }  /* раздел — заголовок, не карточка */
 details.sect > summary { display: flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; padding: 6px 8px; margin: 0 -8px; }

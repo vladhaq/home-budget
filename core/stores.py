@@ -12,7 +12,7 @@ from core.db import connect, get_meta, set_meta
 STORES = {
     "lidl": ("Lidl", "чеки из приложения Lidl Plus, газетки и скидки", True),
     "kaufland": ("Kaufland", "чеки из приложения Kaufland Card, газетки и скидки", True),
-    "biedronka": ("Biedronka", "чеки (PDF) с сайта Moja Biedronka — beta", False),
+    "biedronka": ("Biedronka", "чеки с сайта Moja Biedronka и газетки (распознаются с картинок — цены могут быть неточными) — beta", True),
 }
 
 

@@ -19,7 +19,7 @@ from core.common import fold, word_matches
 from core.db import connect
 
 SIZE = re.compile(r"(\d+(?:[.,]\d+)?)\s?(?:x\s?(\d+(?:[.,]\d+)?)\s?)?(kg|g|ml|l)(?:pl)?\b")  # «300gpl» — граммы, в пластах
-STORES = {"lidl": "Lidl", "kaufland": "Kaufland"}
+STORES = {"lidl": "Lidl", "kaufland": "Kaufland", "biedronka": "Biedronka"}
 MODES = ("regular", "best")
 WINDOW = 90  # дней: «было» — первые покупки за этот срок, «стало» — последние
 STALE = 180  # дней: последняя покупка давнее — товар не в инфляции (цена «сейчас» неизвестна)

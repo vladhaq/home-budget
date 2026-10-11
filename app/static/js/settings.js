@@ -117,6 +117,12 @@ function storesBox() {
     <p class="muted">Выключенный магазин не обновляется («Обновить всё» и автозапуск), его нет в источниках и на странице «Скидки».
       Уже собранные чеки остаются в бюджете.</p>`;
 }
+async function setAutoStep(key, on) {
+  try { await post("/api/update/steps", {key, on}); toast(on ? "Шаг снова в «Обновить всё»" : "Шаг не входит в «Обновить всё» — только кнопкой «обновить»"); }
+  catch (e) { toast("Не получилось: " + e.message); }
+  UPD = null;
+  await renderSettings();
+}
 async function setStore(key, on) {
   try { const j = await post("/api/stores", {key, on}); UPD.stores = j.stores; }
   catch (e) { toast("Не получилось: " + e.message); }
@@ -137,7 +143,7 @@ function drawSettings() {
   const srcBad = UPD.sources.filter(s => (s.last && s.last.status === "error") || s.warn).length;
   const srcWarn = UPD.sources.filter(s => s.last && (s.last.status === "warn" || s.last.status === "off")).length;
   const onStores = (UPD.stores || []).filter(s => s.on).map(s => s.title);
-  const order = UPD.sources.filter(s => !["reconcile", "backup"].includes(s.key)).map(s => s.title).join(", ");
+  const order = UPD.sources.filter(s => s.auto !== false && !["reconcile", "backup"].includes(s.key)).map(s => s.title).join(", ");
 
   const updBody = `<div class="updbox">
       <button class="btn" data-updrun="" ${run || loginRunning() ? "disabled" : ""}>${run ? "Обновление идёт…" : "Обновить всё сейчас"}</button>
@@ -149,12 +155,15 @@ function drawSettings() {
       источника не останавливает остальные. Входы (логины, пароли) обновление не запрашивает — если вход в Lidl, Kaufland
       или банк устарел, нажми «обновить токен» в строке источника.</p>`;
 
-  const srcBody = `<table><tr><th>источник</th><th>подключение</th><th>успешно обновлено</th><th>данные по</th><th>последний результат</th><th></th></tr>` +
+  const srcBody = `<table><tr><th title="участвует в «Обновить всё» и автозапуске">в «Обновить всё»</th><th>источник</th><th>подключение</th><th>успешно обновлено</th><th>данные по</th><th>последний результат</th><th></th></tr>` +
     UPD.sources.map(s => {
       const l = s.last, bad = (l && l.status === "error") || !!s.warn, wrn = l && (l.status === "warn" || l.status === "off");
       const btn = LOGIN_CMD.test(s.setup || "");  // вход кнопкой — подсказка-команда в строке не нужна
       const hint = l && l.hint && !(l.summary || "").includes(l.hint) && !(btn && LOGIN_CMD.test(l.hint)) ? `<br>→ ${cmd(l.hint)}` : "";
-      return `<tr class="${bad ? "err" : wrn ? "wrn" : ""}"><td><b>${esc(s.title)}</b></td>
+      return `<tr class="${bad ? "err" : wrn ? "wrn" : ""}${s.auto === false ? " off" : ""}"><td class="n"><label class="switch" title="${s.fixed
+          ? "сверка нужна всегда — без неё новые покупки не видны" : "участвует в «Обновить всё» и автозапуске; выключено — только кнопкой «обновить»"}">
+          <input type="checkbox" data-autostep="${s.key}" ${s.auto !== false ? "checked" : ""} ${s.fixed ? "disabled" : ""}><span></span></label></td>
+        <td><b>${esc(s.title)}</b></td>
         <td>${s.always ? `<span class="muted">не требуется</span>` : btn
           ? `${s.ready && !(s.token || {}).dead ? "✓ подключено" : `<span class="warn">${esc(s.token && s.token.dead ? "токен истёк" : s.missing)}</span>`}
              ${tokenInfo(s)}${loginBtn(LOGIN_CMD.exec(s.setup)[1], s.ready ? "обновить токен" : "войти")}`
@@ -165,7 +174,9 @@ function drawSettings() {
           ${s.warn ? `<div class="up">⚠ ${esc(s.warn)}${btn ? "" : ` — ${cmd(s.setup)}`}</div>` : ""}</td>
         <td><button class="chip" data-updrun="${s.key}" ${run || loginRunning() ? "disabled" : ""}>обновить</button></td></tr>`;
     }).join("") + `</table>
-    <p class="muted">«Обновить токен» — новый вход: откроется окно Chrome, логин, пароль и коды вводишь там сам (программа их не
+    <p class="muted">Переключатель слева — участвует ли источник в «Обновить всё» и автозапуске: выключенный обновляется только
+      кнопкой «обновить» в его строке (например, долгое распознавание газеток Biedronka, если нужны только чеки).
+      «Обновить токен» — новый вход: откроется окно Chrome, логин, пароль и коды вводишь там сам (программа их не
       видит), окно закроется само. В «Обновить всё» не входит. Средний срок жизни — от входа до отказа сервиса, считается
       с октября 2026. Команды в серых рамках нажатием копируются — вставь в терминал в папке budget. «Обновить» в строке —
       только этот источник (и сверка). Ошибка с пометкой «в программе» — открой журнал ниже и пришли текст Claude.</p>`;
