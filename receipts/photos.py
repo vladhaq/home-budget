@@ -4,6 +4,7 @@
 """
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -80,12 +81,19 @@ def variants(img: Image.Image):
 
 
 def tesseract(img: Image.Image, psm: int, exe: str) -> str:
-    tmp = DATA / "_ocr.png"
-    img.save(tmp)
-    out = subprocess.run([exe, str(tmp), "stdout", "-l", "pol+eng", "--psm", str(psm), "--tessdata-dir", str(TESSDATA)],
-                         capture_output=True, text=True, encoding="utf-8",
-                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # без мелькающих окон при автозапуске
-    tmp.unlink(missing_ok=True)
+    # своя временная картинка у каждого вызова: общий data/_ocr.png ломал одновременные распознавания
+    # (фото из Telegram и чеки Biedronka в одном обновлении, ручной импорт во время автозапуска) — «файл занят»
+    import tempfile
+    fd, name = tempfile.mkstemp(prefix="_ocr_", suffix=".png", dir=DATA)
+    os.close(fd)
+    tmp = Path(name)
+    try:
+        img.save(tmp)
+        out = subprocess.run([exe, str(tmp), "stdout", "-l", "pol+eng", "--psm", str(psm), "--tessdata-dir", str(TESSDATA)],
+                             capture_output=True, text=True, encoding="utf-8",
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))  # без мелькающих окон при автозапуске
+    finally:
+        tmp.unlink(missing_ok=True)
     return out.stdout
 
 

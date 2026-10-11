@@ -110,17 +110,11 @@ def step_kaufland(con):
 def step_biedronka(con):
     from receipts import biedronka
     if not biedronka.SESSION.exists():
-        raise Skip("не подключено", "Открой Настройки → Подключить Biedronka")
-    before = n_biedronka_receipts(con)
-    biedronka.sync()
-    new = n_biedronka_receipts(con) - before
-    return "ok", f"новых чеков: {new}" if new else "новых чеков нет"
-
-
-def n_biedronka_receipts(con) -> int:
-    purchases = count(con, "SELECT count(*) FROM purchases WHERE merchant = 'Biedronka'")
-    attached = count(con, "SELECT count(*) FROM attachments WHERE source_ref LIKE 'biedronka:%'")
-    return purchases + attached
+        raise Skip("не подключено", "подключение — в «Настройках» → «Магазины» → Biedronka")
+    r = biedronka.sync()
+    new = r["imported"] + r["attached"]
+    return "ok", (f"новых чеков: {new}" + (f" (прикреплено к известным: {r['attached']})" if r["attached"] else "")
+                  if new else "новых чеков нет")
 
 
 def mail_ready() -> bool:
@@ -260,7 +254,9 @@ def step_reconcile(con):
 
 
 def step_deals(con):
-    from core import deals
+    from core import deals, stores
+    if not stores.deal_stores():
+        raise Skip("магазины с газетками выключены в «Настройках» → «Магазины»")
     r = deals.auto()
     summary = f"газеток Lidl и Kaufland: {r['flyers']}, акций на постоянные позиции: {r['deals']}"
     if r.get("errors"):
@@ -386,14 +382,50 @@ def describe_error(e: BaseException) -> tuple[str, str | None]:
     return f"{e.__class__.__name__}: {e}", "ошибка в программе — подробности в журнале ниже"
 
 
+def stay_awake(on: bool, _h: list = []):  # noqa: B006 — описатель запроса живёт между вызовами
+    """Попросить Windows не усыплять компьютер и не замораживать процесс, пока идёт обновление (как плеер или загрузка):
+    SetThreadExecutionState — не засыпать по бездействию; запрос питания PowerRequestExecutionRequired — не
+    приостанавливать процесс в Modern Standby (ноутбук просыпался ради автозапуска и сразу засыпал — обновление
+    замирало до утра). Закрытую крышку или кнопку питания Windows не отменяет — на этот случай у задачи лимит 12 ч.
+    Снимается и сам при завершении процесса. Не Windows или запрос не принят — обновление идёт как обычно."""
+    import ctypes
+    from ctypes import wintypes
+    try:
+        k = ctypes.WinDLL("kernel32")
+        k.PowerCreateRequest.restype = wintypes.HANDLE
+        k.SetThreadExecutionState.argtypes = [wintypes.DWORD]
+        if on:
+            class Reason(ctypes.Structure):
+                _fields_ = [("Version", wintypes.ULONG), ("Flags", wintypes.DWORD), ("Text", wintypes.LPWSTR)]
+            reason = Reason(0, 1, "Домашний бюджет: обновление данных")  # версия 0, простая строка
+            h = k.PowerCreateRequest(ctypes.byref(reason))
+            if h and h != wintypes.HANDLE(-1).value:
+                for kind in (1, 3):  # PowerRequestSystemRequired, PowerRequestExecutionRequired
+                    k.PowerSetRequest(wintypes.HANDLE(h), kind)
+                _h.append(h)
+            k.SetThreadExecutionState(0x80000000 | 0x1)  # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        else:
+            while _h:
+                h = wintypes.HANDLE(_h.pop())
+                for kind in (3, 1):
+                    k.PowerClearRequest(h, kind)
+                k.CloseHandle(h)
+            k.SetThreadExecutionState(0x80000000)
+    except (AttributeError, OSError):
+        pass
+
+
 def run(trigger: str = "manual", only: list[str] | None = None) -> int | None:
     lock = acquire_lock(wait=3)
     if lock is None:
         print("Обновление уже идёт (другой запуск). Подожди, пока закончится.")
         return None
+    stay_awake(True)  # до ожидания сети: проснувшись ради автозапуска, Windows не уснёт снова, пока идёт обновление
     con = db()
     mark_dead(con)
-    steps = [s for s in STEPS if not only or s[0] in only]
+    from core import stores
+    on = stores.enabled(con)  # выключенный в «Настройках» магазин не обновляется
+    steps = [s for s in STEPS if (not only or s[0] in only) and on.get(s[0], True)]
     if only and set(only) & {"lidl", "kaufland", "biedronka", "mail", "telegram", "photos", "bank"} and "reconcile" not in only:
         steps.append(next(s for s in STEPS if s[0] == "reconcile"))  # новые покупки без сверки и категорий не видны
     cur = con.execute("INSERT INTO update_runs (started, trigger, steps) VALUES (?, ?, ?)",
@@ -450,6 +482,7 @@ def run(trigger: str = "manual", only: list[str] | None = None) -> int | None:
             con.execute("DELETE FROM update_runs WHERE id = ?", (rid,))
         con.commit()
         lock.close()
+        stay_awake(False)
     say(f"\nГотово: {summary}. Подробности — в интерфейсе, страница «Настройки».")
     return run_id
 
@@ -462,6 +495,10 @@ def mark_dead(con):
     if not con.execute("SELECT 1 FROM update_runs WHERE finished IS NULL").fetchone():
         return
     msg = "прервано: процесс обновления завершился, не дойдя до конца"
+    # ни одного шага: обычно ноутбук уснул сразу после автозапуска, и Windows сняла задачу по лимиту времени
+    con.execute("UPDATE update_runs SET finished = ?, status = 'error', summary = ? WHERE finished IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM update_steps s WHERE s.run_id = update_runs.id)",
+                (now(), "прервано до первого шага: компьютер, скорее всего, уснул сразу после автозапуска"))
     con.execute("UPDATE update_runs SET finished = ?, status = 'error', summary = ? WHERE finished IS NULL", (now(), msg))
     con.execute("UPDATE update_steps SET finished = ?, status = 'error', summary = ? WHERE status = 'running'", (now(), msg))
     con.commit()
@@ -503,9 +540,8 @@ def sources(con) -> list[dict]:
                  f"чеков: {n_purchases(con, 'lidl')}"),
         "kaufland": (kaufland.TOKEN.exists(), "python budget.py kaufland login", max_date("kaufland"),
                      f"чеков: {n_purchases(con, 'kaufland')}"),
-        "biedronka": (biedronka.SESSION.exists(), "Открой Настройки → Подключить Biedronka",
-                      con.execute("SELECT max(date) FROM purchases WHERE merchant = 'Biedronka'").fetchone()[0],
-                      f"чеков: {n_biedronka_receipts(con)}"),
+        "biedronka": (biedronka.SESSION.exists(), "подключение — в «Настройках» → «Магазины» → Biedronka",
+                      biedronka.downloaded()["last"], f"чеков: {biedronka.downloaded()['n']}"),
         "mail": (mail_ready(), "python budget.py mail login",
                  con.execute("SELECT max(date) FROM emails").fetchone()[0] if have_emails else None,
                  f"покупок из писем: {n_purchases(con, 'email')}"),
@@ -524,7 +560,11 @@ def sources(con) -> list[dict]:
                    f"папка: {backup.settings()['dir']}"),
     }
     out = []
+    from core import stores
+    on = stores.enabled(con)
     for key, title, _ in STEPS:
+        if not on.get(key, True):  # выключенный магазин — не в списке источников
+            continue
         ready, setup, data_date, note = info[key]
         warn = None
         if key == "bank" and days is not None and 0 <= days <= 21:
@@ -593,10 +633,12 @@ def schedule_on(at: str = "07:30"):
     if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", at):
         raise SystemExit("Время в формате ЧЧ:ММ, например 07:30")
     q = lambda s: str(s).replace("'", "''")  # noqa: E731
+    # не уснуть посреди обновления просит само обновление (stay_awake); лимит 12 ч — запасной: если ноутбук всё же
+    # «заморозил» запуск (закрыли крышку), тот продолжится после пробуждения, а не будет снят Windows (с 2 ч снимала)
     _ps(f"""
 $a = New-ScheduledTaskAction -Execute '{q(pythonw())}' -Argument '"{q(BUDGET / "budget.py")}" update --trigger schedule' -WorkingDirectory '{q(BUDGET)}'
 $t = New-ScheduledTaskTrigger -Daily -At ([datetime]::Today.AddHours({int(at.split(":")[0])}).AddMinutes({int(at.split(":")[1])}))
-$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 12)
 Register-ScheduledTask -TaskName '{TASK}' -Action $a -Trigger $t -Settings $s -Description 'Домашний бюджет: обновить всё (budget.py update). Если компьютер был выключен — запустится при включении.' -Force | Out-Null
 """)
     return schedule_status()

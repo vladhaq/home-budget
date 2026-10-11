@@ -139,16 +139,23 @@ def headers() -> dict:
     return {"Authorization": f"Bearer {_access}", **APP_HEADERS}
 
 
-def list_tickets() -> list[dict]:
-    out, page = [], 1
+def list_tickets(known: set | None = None, quiet_pages: int = 2) -> list[dict]:
+    """Список чеков, новые — первыми. known — уже скачанные id: листаем, пока не встретятся quiet_pages страниц
+    подряд, где все чеки известны (запас — если Lidl добавит чек задним числом), а не всю историю каждый раз."""
+    out, page, quiet = [], 1, 0
     while True:
         r = requests.get(TICKETS.format(v="v2"), params={"pageNumber": page, "onlyFavorite": "false"},
                          headers=headers(), timeout=60)
         r.raise_for_status()
         data = r.json()
-        out += data.get("tickets", [])
-        if page * data.get("size", 10) >= data.get("totalCount", 0) or not data.get("tickets"):
+        tickets = data.get("tickets", [])
+        out += tickets
+        if page * data.get("size", 10) >= data.get("totalCount", 0) or not tickets:
             return out
+        if known is not None:
+            quiet = quiet + 1 if all(f"lidl:{t.get('id')}" in known for t in tickets) else 0
+            if quiet >= quiet_pages:
+                return out
         page += 1
 
 
@@ -263,9 +270,9 @@ def rel(path) -> str:
 def sync():
     con = connect()
     known = {r[0] for r in con.execute("SELECT id FROM purchases WHERE source = 'lidl'")}
-    tickets = list_tickets()
+    tickets = list_tickets(known)
     new = [t for t in tickets if f"lidl:{t.get('id')}" not in known]
-    print(f"Чеков в аккаунте: {len(tickets)}, новых: {len(new)}")
+    print(f"Просмотрено последних чеков: {len(tickets)}, новых: {len(new)}")
     RAW.mkdir(parents=True, exist_ok=True)
     for n, t in enumerate(new, 1):
         tid = str(t["id"])

@@ -1,7 +1,7 @@
 // Состояние, оформление, фильтры, выбор категории. Файлы — обычные скрипты с общей областью видимости,
 // подключаются по порядку (core → overview → pages → deals → settings → main); main.js запускает load().
 const MONTHS = ["январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"];
-const SOURCES = {lidl: "Lidl Plus", kaufland: "Kaufland", photo: "фото чека", email: "почта", bank: "банк (без чека)"};
+const SOURCES = {lidl: "Lidl Plus", kaufland: "Kaufland", biedronka: "Biedronka", photo: "фото чека", email: "почта", bank: "банк (без чека)"};
 const zl = x => (x ?? 0).toLocaleString("ru-RU", {minimumFractionDigits: 2, maximumFractionDigits: 2}) + " zł";
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const monthName = m => MONTHS[+m.slice(5) - 1] + " " + m.slice(0, 4);

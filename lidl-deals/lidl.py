@@ -482,7 +482,9 @@ def describe(d: dict, html=False) -> str:
     if d["price"] is None and d["discount"]:
         parts = [f"скидка −{d['discount']}% (цена в газетке не указана)"]
     no_discount = d["price"] is not None and d["old_price"] is None and not d["discount"]
-    if no_discount:
+    if no_discount and d.get("why"):  # бюджет уже сравнил с прошлой газеткой и чеками (core/deals.py, worth)
+        parts.append(f"— {d['why']}")
+    elif no_discount:
         prev = previous_price(d)
         if prev and prev["price"] != d["price"]:
             diff = round((d["price"] / prev["price"] - 1) * 100)
@@ -734,6 +736,8 @@ def remind_time(d: dict, clock: dt.time) -> dt.datetime | None:
 def reminder_text(d: dict, at) -> str:
     if at is None and d["start"] <= today().isoformat():
         head = f"🛒 {d.get('store', 'Lidl')}: уже на скидке — {status(d)}"
+    elif d.get("why"):
+        head = f"🛒 {d.get('store', 'Lidl')}: завтра ({fmt_date(d['start'])}) дешевле обычного — стоит зайти в магазин"
     else:
         head = f"🛒 {d.get('store', 'Lidl')}: завтра ({fmt_date(d['start'])}) на скидке — стоит зайти в магазин"
     return head + "\n\n" + describe(d, html=True)

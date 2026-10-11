@@ -140,9 +140,10 @@ def day(s: str) -> dt.date:
 
 def reconcile(verbose=True):
     """Полная пересборка: покупки из исходников (чеки Lidl/Kaufland, письма) и сверка с банком."""
-    from receipts import kaufland, lidl, mail_orders
+    from receipts import biedronka, kaufland, lidl, mail_orders
     lidl.reparse()
     kaufland.reparse()
+    biedronka.reparse()  # точные чеки Biedronka из сохранённых JSON
     mail_orders.parse_all(verbose=False)
     return match(verbose)
 

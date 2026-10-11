@@ -218,7 +218,7 @@ details > summary::before { content: ""; display: inline-block; width: 7px; heig
   border-right: 2px solid var(--text-2); border-bottom: 2px solid var(--text-2); transform: rotate(-45deg); transition: transform .3s var(--ease); }
 details[open] > summary::before { transform: rotate(45deg); }
 details > summary:hover { background: var(--hover); }
-details[open] > summary ~ * { animation: drop .3s var(--ease); }
+details.opening[open] > summary ~ * { animation: drop .3s var(--ease); }  /* только при раскрытии кликом, не при перерисовке */
 details > .tscroll { margin: 0 10px 10px; border-radius: 10px; box-shadow: none; }
 details > .tscroll > table { background: var(--panel-2); }
 td details { margin: 2px 0; background: none; box-shadow: none; }
@@ -399,6 +399,16 @@ tr.fresh > td { animation: drop .3s var(--ease); }
 @keyframes pop { from { opacity: 0; transform: scale(.3); } 60% { transform: scale(1.15); } }
 @keyframes grow { from { transform: scaleX(0); } }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* «Настройки»: сворачиваемые разделы, магазины */
+details.sect { margin: 14px 0 4px; background: none; box-shadow: none; border-radius: 0; }  /* раздел — заголовок, не карточка */
+details.sect > summary { display: flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; padding: 6px 8px; margin: 0 -8px; }
+details.sect > summary::before { margin-right: 4px; } details.sect > summary h2 { display: inline; margin: 0; }
+.sectnote { color: var(--text-2); font-size: 13.5px; } details.sect > .sectbody { margin-top: 8px; }
+.stores { display: grid; gap: 8px; } .store { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 10px 14px;
+  border-radius: 12px; background: var(--panel); } .store.off { opacity: .6; } .store label { cursor: pointer; min-width: 120px; }
+.storeconn { flex-basis: 100%; display: grid; gap: 6px; margin: 6px 0 2px 26px; }
+tr.hrow { cursor: pointer; } tr.hrow:hover td { background: var(--hover); }
+.tag { display: inline-block; padding: 0 6px; border-radius: 8px; background: var(--panel-3); color: var(--text-2); font-size: 11px; vertical-align: 1px; }
 ul.notes { margin: 6px 0 4px; padding-left: 20px; font-size: 13.5px; line-height: 1.5; } ul.notes li { margin: 3px 0; }
 .tok { min-width: 215px; margin: 3px 0 6px; color: var(--text-2); font-size: 12.5px; line-height: 1.45; }  /* «Настройки»: дата входа и срок токена */
 @keyframes ripple { to { opacity: 0; transform: scale(1); } }
