@@ -96,10 +96,12 @@ def summary() -> dict:
     """Для списка разделов: сколько акций на постоянные позиции в обоих магазинах. Кэш — пока не поменялись газетки и список."""
     L = mod()
     from core import kaufland_deals as K
-    stamp = tuple(p.stat().st_mtime if p.exists() else 0 for p in (L.INDEX, K.INDEX, L.WATCH, K.WATCH)) + (L.today().isoformat(),)
+    from core import stores
+    on = tuple(stores.deal_stores())  # только включённые в «Настройках» магазины
+    stamp = tuple(p.stat().st_mtime if p.exists() else 0 for p in (L.INDEX, K.INDEX, L.WATCH, K.WATCH)) + (L.today().isoformat(), on)
     if _summary.get("stamp") != stamp:
         data = {"updated": None, "flyers": 0, "deals": 0, "stores": {}}
-        for store in ("lidl", "kaufland"):
+        for store in on:
             idx = index(store)
             n = sum(len(src(store).search(idx, q)) for q in src(store).watchlist()) if idx else 0
             data["stores"][store] = {"flyers": len(idx["flyers"]) if idx else 0, "deals": n}
@@ -115,7 +117,13 @@ def history(query: str, limit: int = 6, store: str = "lidl") -> list[dict]:
     """История цен по газеткам: записи, ряд обычных цен, изменение, лучшая акция, сезонность."""
     L = mod()
     out = []
-    for key, rows in list(src(store).find_history(query).items())[:limit]:
+    found = src(store).find_history(query)
+    if not found:  # название из чека («K.GoudaPlastry500g») — слитно и с фасовкой; в газетке товар назван полностью
+        from core.categories import normalize
+        simple = re.sub(r"\b\d+(?:[.,]\d+)?\s?(?:g|kg|ml|l|szt)\b|\b(?:kg|szt|luz|xxl|xl)\b|\b\w\b|[^\w\s]", " ", normalize(query))
+        if simple.split():
+            found = src(store).find_history(simple)
+    for key, rows in list(found.items())[:limit]:
         series, unit = L.regular_series(rows)
         ch = L.change(series)
         promos = [r for r in rows if r.get("discount") and r.get("price") is not None]
@@ -158,7 +166,8 @@ def auto() -> dict:
     L = mod()
     today = L.today().isoformat()
     found, flyers, errors = [], 0, []
-    for store in ("lidl", "kaufland"):
+    from core import stores
+    for store in stores.deal_stores():  # выключенный магазин: газетки не качаем, о его акциях не напоминаем
         try:
             idx = src(store).update(verbose=False)
         except Exception as e:  # noqa: BLE001 — сайт магазина недоступен
@@ -166,12 +175,70 @@ def auto() -> dict:
             idx = index(store)
         if idx:
             flyers += len(idx["flyers"])
-            found += [d for q in src(store).watchlist() for d in src(store).search(idx, q)]
-    upcoming = [d for d in found if d["start"] >= today]
+            rows = _receipt_rows(store)
+            for q in src(store).watchlist():
+                usual = usual_price(rows, q)
+                found += [d | {"store_key": store, "q": q, "usual": usual} for d in src(store).search(idx, q)]
+    upcoming = [d for d in found if d["start"] >= today and worth(d)]
     tg = telegram_state()
     made = L.schedule_reminders(upcoming, interactive=False) if upcoming and tg["ready"] else []
     return {"flyers": flyers, "deals": len(found), "upcoming": len(upcoming), "errors": errors,
             "reminded": sum(1 for r in made if not r.get("skipped")), "telegram": tg}
+
+
+# ---------------------------------------------------------------- о каких акциях напоминать
+
+def _receipt_rows(store: str) -> dict:
+    from core import prices
+    from core.db import connect
+    try:
+        return prices.rows(connect(), prices.STORES[store])
+    except Exception:  # noqa: BLE001 — без базы чеков напоминаем по газеткам
+        return {}
+
+
+def usual_price(rows: dict, q: str) -> dict | None:
+    """Твоя обычная (регулярная) цена позиции по чекам магазина: {"price", "unit": "kg"|"l"|None (за штуку), "title"}."""
+    from core import prices
+    found = prices.find(rows, q)
+    for _, rs in found:
+        if ch := prices.change(rs, "regular", min_n=2, min_days=14):
+            unit = ch["unit"].split("/")[1]
+            return {"price": ch["p1"], "unit": unit if unit in ("kg", "l") else None, "title": rs[-1]["name"]}
+    if found:  # одна-две покупки — последняя цена на полке
+        r = found[0][1][-1]
+        return {"price": r["per_unit"] or r["price"], "unit": r["pu_unit"] if r["per_unit"] else None, "title": r["name"]}
+    return None
+
+
+def worth(d: dict) -> bool:
+    """Стоит ли напоминать об акции постоянной позиции. Напоминание об обычной цене — мусор, поэтому:
+    в названии акции должны быть слова позиции (не «Parówki z fileta» на «filet z kurczaka» из соседнего текста газетки);
+    скидка в газетке — напоминаем; без скидки — только если цена на 5%+ ниже прошлой газетки этого товара
+    или твоей обычной цены по чекам (тогда причина — в d["why"], она попадёт в текст напоминания)."""
+    from core import prices
+    from core.categories import normalize
+    L = mod()
+    if d.get("q") and not prices.matches(normalize(d["title"]), d["q"]):
+        return False
+    price = d.get("price")
+    if d.get("discount") or (d.get("old_price") and price and d["old_price"] > price * 1.02):
+        return True
+    if price is None:
+        return False
+    store = d.get("store_key") or "lidl"
+    if (prev := src(store).previous_price(d)) and price <= prev["price"] * 0.95:
+        d["why"] = f"скидки в газетке нет, но дешевле, чем в газетке от {L.fmt_date(prev['start'])}: {L.money(prev['price'])}"
+        return True
+    u = d.get("usual")
+    if u and not d.get("approx"):
+        mine = d.get("unit_price") if u["unit"] and d.get("unit") == u["unit"] else price if not u["unit"] else None
+        if mine and mine <= u["price"] * 0.95:
+            per = f" за {dict(kg='кг', l='л')[u['unit']]}" if u["unit"] else ""
+            d["why"] = (f"скидки в газетке нет, но дешевле твоей обычной цены: {L.money(mine)}{per} против "
+                        f"{L.money(u['price'])}{per} («{u['title']}» по чекам)")
+            return True
+    return False
 
 
 # ---------------------------------------------------------------- где выгоднее: одинаковое в обоих магазинах

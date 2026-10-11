@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Budget Browser Connector",
-  "version": "1.3.1",
+  "version": "1.3.0",
   "description": "Connects supported websites to the local home-budget app.",
   "permissions": ["cookies"],
   "host_permissions": [

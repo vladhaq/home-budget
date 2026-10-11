@@ -14,7 +14,8 @@ function renderNav(unknownCount, setWarn) {
            bd: D.meta.bank_days_left != null && D.meta.bank_days_left <= 21 ? `<span class="badge red">!</span>` : ""},
     cash: {s: WALLET && WALLET.start ? `на руках ${zl(WALLET.balance)}` : "наличные на руках"},
     analytics: {s: ANALYTICS ? `прогноз месяца: ${zl(ANALYTICS.month.forecast)}` : "прогноз, календарь, регулярное"},
-    deals: {s: !D.meta.deals ? "газетки Lidl и Kaufland" : D.meta.deals.deals ? `${D.meta.deals.deals} акций на твои позиции`
+    deals: {s: !(D.meta.deal_stores || []).length ? "магазины выключены" : !D.meta.deals ? `газетки ${D.meta.deal_stores.map(k => STORE_NAME[k]).join(" и ")}`
+              : D.meta.deals.deals ? `${D.meta.deals.deals} акций на твои позиции`
               : `газеток: ${D.meta.deals.flyers}, на позиции акций нет`, tm: D.meta.deals ? when(D.meta.deals.updated || "") : "",
             bd: D.meta.deals && D.meta.deals.deals ? `<span class="badge">${D.meta.deals.deals}</span>` : ""},
     unknown: {s: [unknownCount ? `${unknownCount} без категории` : "", nDoubt ? `${nDoubt} под вопросом` : ""].filter(Boolean).join(" · ")
@@ -99,6 +100,13 @@ async function setCategory(body) {
 document.addEventListener("change", e => {  // выписка из файла на странице «Банк»
   if (e.target.id === "stmtfile" && e.target.files.length) importStatements(e.target.files);
 });
+document.addEventListener("click", e => {  // раскрытие блока кликом — с анимацией; перерисовка страницы — без неё
+  const s = e.target.closest("summary");
+  if (!s || !s.parentElement || s.parentElement.tagName !== "DETAILS") return;
+  const d = s.parentElement;
+  d.classList.add("opening");
+  setTimeout(() => d.classList.remove("opening"), 400);
+}, true);
 document.addEventListener("click", async e => {
   if (e.target.closest("#picker, #modal, #toast")) return;
   const cp = e.target.closest("code[data-copy]");
@@ -106,6 +114,12 @@ document.addEventListener("click", async e => {
   const pick = e.target.closest(".catpick");
   if (pick) { e.preventDefault(); openPicker(pick); return; }
   if (PICK) closePicker();
+  const hr = e.target.closest("tr[data-hq]");  // строка инфляции — история цены этого товара
+  if (hr) {
+    const inp = document.getElementById("hq");
+    if (inp) { inp.value = hr.dataset.hq; await dealHistory(); inp.scrollIntoView({behavior: "smooth", block: "start"}); }
+    return;
+  }
   const t = e.target.closest("button, th");
   if (!t) { hidePopup(e); return; }
   if (t.id === "savebtn") { await saveAll(); return; }
@@ -160,6 +174,7 @@ document.addEventListener("click", async e => {
     toast(hm ? `Время операции: ${hm}` : "Время — снова по выписке"); return;
   }
   if (t.dataset.dhist) { await dealHistory(); return; }
+  if (t.dataset.imode) { setInflMode(t.dataset.imode); return; }
   if (t.dataset.remind) {
     const j = await dealsAction(() => post("/api/deals/remind", {q: t.dataset.q, keys: [t.dataset.remind], store: S.dealStore}), "Ставлю напоминание в Telegram…");
     if (j) {
@@ -198,6 +213,7 @@ document.addEventListener("click", async e => {
   if (t.dataset.updrun !== undefined) { await startUpdate(t.dataset.updrun ? [t.dataset.updrun] : []); return; }
   if (t.dataset.sched) { await setSchedule(t.dataset.sched === "on"); return; }
   if (t.dataset.login) { await startLogin(t.dataset.login); return; }
+  if (t.dataset.bcheck) { await checkBiedronkaSession(true); return; }
   if (t.dataset.upcheck !== undefined) { await checkUpgrade(); return; }
   if (t.dataset.upinstall !== undefined) { await installUpgrade(); return; }
   if (t.dataset.monthOpen) {
@@ -278,6 +294,7 @@ document.addEventListener("click", async e => {
 
 document.addEventListener("change", async e => {
   const t = e.target;
+  if (t.dataset.store) { await setStore(t.dataset.store, t.checked); return; }  // «Настройки» → «Магазины»
   if (t.dataset.f) { S.F[t.dataset.f] = t.value; render(); return; }
   if (t.dataset.only) { const p = PENDING.get(t.dataset.only); if (p) p.mode = t.checked ? "item" : "same"; }
 });

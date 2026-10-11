@@ -55,34 +55,76 @@ function checkBiedronkaExtension() {
 }
 
 async function renderSettings() {
-  BIEDRONKA_SESSION = null;
   checkBiedronkaExtension();
-  checkBiedronkaSession();
   if (!UPD) UPD = await (await fetch("/api/update")).json();
   if (loginRunning() && !LOGIN_WAIT) { LOGIN_WAIT = UPD.login.key; pollLogin(); }  // вход начат до перезагрузки страницы
+  if ((UPD.stores || []).some(s => s.key === "biedronka" && s.on)) checkBiedronkaSession(false);
   if (!SCHED) {
     SCHED = {loading: true};
     fetch("/api/update/schedule").then(r => r.json()).then(s => { SCHED = s; if (S.page === "settings") drawSettings(); });
   }
   drawSettings();
 }
-async function checkBiedronkaSession() {
-  if (BIEDRONKA_SESSION !== null || BIEDRONKA_SESSION_CHECKING) return;
+// статус сессии Biedronka: обычно — по локальным данным; net — проверить на сайте (кнопка «проверить на сайте»)
+async function checkBiedronkaSession(net) {
+  if (BIEDRONKA_SESSION_CHECKING) return;
   BIEDRONKA_SESSION_CHECKING = true;
-  try {
-    const response = await fetch("/api/biedronka/session-status");
-    const result = await response.json();
-    if (!response.ok || !["valid", "missing", "expired", "unavailable"].includes(result.status)) {
-      throw new Error("Unexpected Biedronka session status response");
-    }
-    BIEDRONKA_SESSION = result.status;
-  } catch {
-    BIEDRONKA_SESSION = "unavailable";
-  } finally {
+  if (net && S.page === "settings") drawSettings();
+  try { BIEDRONKA_SESSION = await (await fetch("/api/biedronka/session-status" + (net ? "?check=1" : ""))).json(); }
+  catch (e) { BIEDRONKA_SESSION = {status: "unavailable"}; }
+  finally {
     BIEDRONKA_SESSION_CHECKING = false;
     if (S.page === "settings") drawSettings();
   }
 }
+// разделы настроек сворачиваются; что открыто — запоминается (по умолчанию открыты обновление, магазины и источники)
+const SECT_DEFAULT = {update: true, stores: true, sources: true, schedule: false, program: false, hidden: false, journal: false};
+let SECT = (() => { try { return JSON.parse(localStorage.getItem("budget-settings-open") || "{}"); } catch (e) { return {}; } })();
+const sectOpen = id => SECT[id] ?? SECT_DEFAULT[id];
+const section = (id, title, note, body) => `<details class="sect" data-sect="${id}" ${sectOpen(id) ? "open" : ""}>
+  <summary><h2>${title}</h2>${note ? `<span class="sectnote">${note}</span>` : ""}</summary><div class="sectbody">${body}</div></details>`;
+document.addEventListener("toggle", e => {  // toggle не всплывает — ловим на погружении
+  const id = e.target.dataset && e.target.dataset.sect;
+  if (!id) return;
+  SECT[id] = e.target.open;
+  try { localStorage.setItem("budget-settings-open", JSON.stringify(SECT)); } catch (err) { /* без хранилища — до перезагрузки */ }
+}, true);
+
+// Biedronka: подключение сессии из Chrome через расширение «Budget Browser Connector»
+function biedronkaBox() {
+  const st = BIEDRONKA_SESSION || {}, s = st.status;
+  const ext = BIEDRONKA_EXTENSION === false ? `<div class="muted">Расширение «Budget Browser Connector» не найдено. В Chrome открой
+      <code>chrome://extensions</code>, включи «Режим разработчика», нажми «Загрузить распакованное расширение» и выбери папку
+      <code data-copy="${esc(st.connector || "")}" title="нажми, чтобы скопировать">${esc(st.connector || "tools\\browser-connector")}</code>.</div>` : "";
+  const how = `<div class="muted">Войди в Moja Biedronka в Chrome, нажми значок расширения «Budget Browser Connector» →
+      «Подключить к бюджету». Передаются только cookies сайта Biedronka и только этой программе на этом компьютере; пароль
+      расширение не видит.</div>`;
+  const head = !s ? `<span class="muted"><span class="spin"></span>проверяю…</span>`
+    : s === "missing" ? `<b>Biedronka ещё не подключена</b>`
+    : s === "expired" ? `<b class="warn">Сессия Moja Biedronka истекла</b> — подключи заново`
+    : s === "unavailable" ? `<span class="warn">Сайт Biedronka не ответил — попробуй позже</span>`
+    : `✓ сессия сохранена${s === "valid" ? " и проверена на сайте" : ""}`;
+  return `<div class="storeconn">${head}
+    ${s === "saved" || s === "valid" ? `<button class="chip" data-bcheck="1" ${BIEDRONKA_SESSION_CHECKING ? "disabled" : ""}>проверить на сайте</button>` : ""}
+    ${s === "missing" || s === "expired" ? ext + how : ""}</div>`;
+}
+function storesBox() {
+  const L = UPD.stores || [];
+  return `<div class="stores">${L.map(s => `<div class="store ${s.on ? "" : "off"}">
+      <label><input type="checkbox" data-store="${s.key}" ${s.on ? "checked" : ""}> <b>${esc(s.title)}</b></label>
+      <span class="muted">${esc(s.about)}</span>
+      ${s.key === "biedronka" && s.on ? biedronkaBox() : ""}</div>`).join("")}</div>
+    <p class="muted">Выключенный магазин не обновляется («Обновить всё» и автозапуск), его нет в источниках и на странице «Скидки».
+      Уже собранные чеки остаются в бюджете.</p>`;
+}
+async function setStore(key, on) {
+  try { const j = await post("/api/stores", {key, on}); UPD.stores = j.stores; }
+  catch (e) { toast("Не получилось: " + e.message); }
+  UPD = null; DEALS = null; DINFL = null; DCMP = null;
+  await renderSettings();
+  load();  // боковое меню и «Скидки» — без выключенного магазина
+}
+
 function drawSettings() {
   const main = document.getElementById("main"), last = UPD.runs[0], run = updRunning();
   const cur = run && last && !last.finished ? last.steps.find(s => s.status === "running") : null;
@@ -92,34 +134,22 @@ function drawSettings() {
     : sch.installed ? `<b>включён</b>: каждый день в ${esc(sch.time || "?")}${sch.state === "Disabled" ? ` <span class="up">(задача отключена в Планировщике)</span>` : ""}.
         Следующий запуск: ${dtf(sch.next_run)}. Последний: ${dtf(sch.last_run)}${sch.last_run && !sch.last_ok ? ` <span class="up">(код ошибки ${sch.last_result})</span>` : ""}`
     : `<b>выключен</b>${sch.error ? ` <span class="up">(${esc(sch.error)})</span>` : ""}`;
-  main.innerHTML = `
-    <h2>Обновление данных</h2>
-    <div class="updbox">
+  const srcBad = UPD.sources.filter(s => (s.last && s.last.status === "error") || s.warn).length;
+  const srcWarn = UPD.sources.filter(s => s.last && (s.last.status === "warn" || s.last.status === "off")).length;
+  const onStores = (UPD.stores || []).filter(s => s.on).map(s => s.title);
+  const order = UPD.sources.filter(s => !["reconcile", "backup"].includes(s.key)).map(s => s.title).join(", ");
+
+  const updBody = `<div class="updbox">
       <button class="btn" data-updrun="" ${run || loginRunning() ? "disabled" : ""}>${run ? "Обновление идёт…" : "Обновить всё сейчас"}</button>
       <span class="big">${run ? `<span class="spin"></span>${cur ? "сейчас: " + esc(cur.title) : "запускается…"}`
         : lastDone ? `Последнее обновление: <b>${dtf(lastDone.finished)}</b> (${TRIG[lastDone.trigger] || lastDone.trigger}) ${stBadge(lastDone.status)}
             <span class="muted">${esc(lastDone.summary || "")}</span>` : "Обновлений ещё не было."}</span>
     </div>
-    <p class="muted">По очереди: Lidl, Kaufland, почта, фото из Telegram и папки receipts/inbox, выписка PKO, сверка и категории,
-      резервная копия. Обычно 1–2 минуты. Ошибка одного источника не останавливает остальные.
-      Входы (логины, пароли) обновление не запрашивает — если вход в Lidl, Kaufland или банк устарел, нажми
-      «обновить токен» в строке источника.</p>
+    <p class="muted">По очереди: ${esc(order)}, затем сверка и категории, резервная копия. Обычно 1–2 минуты. Ошибка одного
+      источника не останавливает остальные. Входы (логины, пароли) обновление не запрашивает — если вход в Lidl, Kaufland
+      или банк устарел, нажми «обновить токен» в строке источника.</p>`;
 
-    ${BIEDRONKA_SESSION === "missing" || BIEDRONKA_SESSION === "expired" ? `
-      <h2>Подключение Biedronka</h2>
-      <div class="updbox">
-        ${BIEDRONKA_EXTENSION === false ? `<div class="muted">Расширение «Budget Browser Connector» не обнаружено. В Chrome открой
-          <code>chrome://extensions</code>, включи «Режим разработчика» и выбери «Загрузить распакованное расширение»,
-          указав папку <code>C:\\LB\\budget\\tools\\browser-connector</code>.</div>` : ""}
-        <div><b>${BIEDRONKA_SESSION === "expired" ? "Сессия Moja Biedronka истекла" : "Biedronka ещё не подключена"}</b>
-          <div class="muted">Войди в Moja Biedronka, нажми значок расширения «Budget Browser Connector» и кнопку «Подключить к бюджету».
-            Cookies передаются только этому приложению на этом компьютере.</div></div>
-      </div>
-      ` : ""}
-    ${BIEDRONKA_SESSION === "unavailable" ? `<p class="muted">Не удалось проверить сессию Biedronka: сайт временно недоступен. Попробуй позже.</p>` : ""}
-
-    <h2>Источники</h2>
-    <table><tr><th>источник</th><th>подключение</th><th>успешно обновлено</th><th>данные по</th><th>последний результат</th><th></th></tr>` +
+  const srcBody = `<table><tr><th>источник</th><th>подключение</th><th>успешно обновлено</th><th>данные по</th><th>последний результат</th><th></th></tr>` +
     UPD.sources.map(s => {
       const l = s.last, bad = (l && l.status === "error") || !!s.warn, wrn = l && (l.status === "warn" || l.status === "off");
       const btn = LOGIN_CMD.test(s.setup || "");  // вход кнопкой — подсказка-команда в строке не нужна
@@ -128,7 +158,7 @@ function drawSettings() {
         <td>${s.always ? `<span class="muted">не требуется</span>` : btn
           ? `${s.ready && !(s.token || {}).dead ? "✓ подключено" : `<span class="warn">${esc(s.token && s.token.dead ? "токен истёк" : s.missing)}</span>`}
              ${tokenInfo(s)}${loginBtn(LOGIN_CMD.exec(s.setup)[1], s.ready ? "обновить токен" : "войти")}`
-          : s.ready ? "✓ подключено" : `<span class="warn">${esc(s.missing)}</span><br>${cmd(s.setup)}`}</td>
+          : `${s.ready && !(s.token || {}).dead ? "✓ подключено" : `<span class="warn">${esc(s.token && s.token.dead ? "сессия истекла" : s.missing)}</span><br>${cmd(s.setup)}`}${tokenInfo(s)}`}</td>
         <td>${s.last_ok ? dtf(s.last_ok.finished) : "—"}</td>
         <td>${s.data ? dtf(s.data.slice(0, 16)) : ""}<div class="muted" style="font-size:.8em">${esc(s.note || "")}</div></td>
         <td>${l ? `${stBadge(l.status)} ${esc(l.summary || "")}${hint}` : "—"}
@@ -138,34 +168,37 @@ function drawSettings() {
     <p class="muted">«Обновить токен» — новый вход: откроется окно Chrome, логин, пароль и коды вводишь там сам (программа их не
       видит), окно закроется само. В «Обновить всё» не входит. Средний срок жизни — от входа до отказа сервиса, считается
       с октября 2026. Команды в серых рамках нажатием копируются — вставь в терминал в папке budget. «Обновить» в строке —
-      только этот источник (и сверка). Ошибка с пометкой «в программе» — открой журнал ниже и пришли текст Claude.</p>
+      только этот источник (и сверка). Ошибка с пометкой «в программе» — открой журнал ниже и пришли текст Claude.</p>`;
 
-    <h2>Автозапуск</h2>
-    <div class="updbox"><span>${schText}</span>
+  const schedBody = `<div class="updbox"><span>${schText}</span>
       <span><input type="time" id="schedtime" value="${esc(sch.time || "07:30")}">
         <button class="btn" data-sched="on">${sch.installed ? "Сохранить время" : "Включить"}</button>
         ${sch.installed ? `<button class="chip" data-sched="off">выключить</button>` : ""}</span></div>
     <p class="muted">Задача «BudgetUpdate» в Планировщике заданий Windows, работает без окна. Если в это время компьютер выключен или
-      спит — обновление запустится, как только он включится.</p>
+      спит — обновление запустится, как только он включится; пока оно идёт, Windows не усыпит компьютер.</p>`;
 
-    <h2>Программа</h2>
-    ${upgradeBox()}
-
-    ${D.hidden.length ? `<h2>Удалённые покупки</h2>
-    <table><tr><th>покупка</th><th>источник</th><th>удалена</th><th></th></tr>` + D.hidden.map(h => `<tr><td>${esc(h.label)}</td>
+  const hiddenBody = `<table><tr><th>покупка</th><th>источник</th><th>удалена</th><th></th></tr>` + D.hidden.map(h => `<tr><td>${esc(h.label)}</td>
       <td>${esc(SOURCES[h.source] || h.source)}</td><td>${dtf(h.created)}</td>
       <td><button class="chip" data-restore="${esc(h.id)}">вернуть</button></td></tr>`).join("") + `</table>
-    <p class="muted">Удалённые покупки не возвращаются при обновлениях. «Вернуть» пересобирает источник и сверку (~30 секунд).</p>` : ""}
+    <p class="muted">Удалённые покупки не возвращаются при обновлениях. «Вернуть» пересобирает источник и сверку (~30 секунд).</p>`;
 
-    <h2>Журнал обновлений</h2>` +
-    (UPD.runs.length ? UPD.runs.map((r, i) => `<details ${i === 0 && r.status && r.status !== "ok" ? "open" : ""}>
+  const journalBody = UPD.runs.length ? UPD.runs.map((r, i) => `<details ${i === 0 && r.status && r.status !== "ok" ? "open" : ""}>
       <summary>${dtf(r.started)} · ${TRIG[r.trigger] || r.trigger} · ${stBadge(r.finished ? r.status : "running")}
         ${esc(r.summary || "")} <span class="muted">${dur(r.started, r.finished)}</span></summary>
       <table><tr><th>шаг</th><th>результат</th><th>что делать</th><th class="n">время</th></tr>` +
       r.steps.map(s => `<tr class="${s.status === "error" ? "err" : s.status === "warn" || s.status === "off" ? "wrn" : ""}"><td>${esc(s.title)}</td>
         <td>${stBadge(s.status)} ${esc(s.summary || "")}${s.output ? `<details><summary class="muted">вывод</summary><pre class="log">${esc(s.output)}</pre></details>` : ""}</td>
         <td>${s.hint && s.status !== "ok" ? cmd(s.hint) : ""}</td><td class="n muted">${dur(s.started, s.finished)}</td></tr>`).join("") +
-      `</table></details>`).join("") : `<p class="muted">Пусто.</p>`);
+      `</table></details>`).join("") : `<p class="muted">Пусто.</p>`;
+
+  main.innerHTML =
+    section("update", "Обновление данных", run ? `<span class="spin"></span>идёт` : lastDone ? `${dtf(lastDone.finished)} ${stBadge(lastDone.status)}` : "", updBody) +
+    section("stores", "Магазины", onStores.length ? `учитываются: ${esc(onStores.join(", "))}` : "все выключены", storesBox()) +
+    section("sources", "Источники", srcBad ? `<span class="up">с ошибкой: ${srcBad}</span>` : srcWarn ? `<span class="warn">с замечаниями: ${srcWarn}</span>` : "все в порядке", srcBody) +
+    section("schedule", "Автозапуск", sch.loading ? "" : sch.installed ? `каждый день в ${esc(sch.time || "?")}` : "выключен", schedBody) +
+    section("program", "Программа", `версия ${esc((UPG && UPG.check && UPG.check.current) || UPD.version || "?")}`, upgradeBox()) +
+    (D.hidden.length ? section("hidden", "Удалённые покупки", `${D.hidden.length}`, hiddenBody) : "") +
+    section("journal", "Журнал обновлений", UPD.runs.length ? `запусков: ${UPD.runs.length}, последний ${dtf(UPD.runs[0].started)} ${stBadge(UPD.runs[0].finished ? UPD.runs[0].status : "running")}` : "", journalBody);
 }
 async function startUpdate(steps) {
   const before = UPD && UPD.runs.length ? UPD.runs[0].id : (D.meta.update_last ? D.meta.update_last.id : 0);
@@ -175,12 +208,20 @@ async function startUpdate(steps) {
   if (S.page === "settings") drawSettings();
   pollUpdate();
 }
+// опрос раз в 2 с: страницу перерисовываем, только если ответ сервера изменился — иначе она «моргает»
+let UPD_SEEN = "";
+function redrawIfChanged() {
+  const now = JSON.stringify(UPD);
+  if (now === UPD_SEEN || S.page !== "settings") return;
+  UPD_SEEN = now;
+  drawSettings();
+}
 async function pollUpdate() {
   clearTimeout(updTimer);
   UPD = await (await fetch("/api/update")).json();
   const r = UPD.runs[0], started = r && r.id > UPD_WAIT.before, done = started && r.finished;
   if (!done && (started || UPD.running || Date.now() - UPD_WAIT.since < 30000)) {
-    if (S.page === "settings") drawSettings();
+    redrawIfChanged();
     updTimer = setTimeout(pollUpdate, 2000);
     return;
   }
@@ -201,7 +242,7 @@ async function pollLogin() {
   UPD = await (await fetch("/api/update")).json();
   const l = UPD.login;
   if (l && l.running) {
-    if (S.page === "settings") drawSettings();
+    redrawIfChanged();
     loginTimer = setTimeout(pollLogin, 2000);
     return;
   }

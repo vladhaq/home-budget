@@ -117,7 +117,7 @@ def data():
                  "last_purchase": purchases[-1]["date"] if purchases else None,
                  "update_last": json.loads(get_meta(con, "update_last") or "null"),
                  "update_running": update.is_running(), "bank_days_left": update.consent_days_left(),
-                 "deals": _deals_summary()},
+                 "deals": _deals_summary(), "deal_stores": _deal_stores()},
         "incomes": _incomes(con),
         "hidden": [dict(r) for r in con.execute("SELECT id, source, label, created FROM hidden_purchases ORDER BY created DESC")],
         "rules": [dict(r) | {"path": cat_paths.get(r["category_id"])} for r in con.execute(
@@ -383,6 +383,23 @@ def delete_rule():
     return jsonify(ok=True)
 
 
+def _deal_stores():
+    from core import stores
+    return stores.deal_stores()
+
+
+@app.post("/api/stores")
+def stores_set():
+    """Включить/выключить магазин (раздел «Магазины» в «Настройках»)."""
+    from core import stores
+    b = request.get_json()
+    try:
+        stores.set_enabled(b.get("key"), bool(b.get("on")))
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    return jsonify(ok=True, stores=stores.listing())
+
+
 def _deals_summary():
     try:
         from core import deals
@@ -588,7 +605,12 @@ def update_state():
     if not running:
         update.mark_dead(con)
     return jsonify({"running": running, "runs": update.runs(con, 30), "sources": update.sources(con),
-                    "login": login_state(con), "version": VERSION})
+                    "login": login_state(con), "version": VERSION, "stores": _stores_listing(con)})
+
+
+def _stores_listing(con):
+    from core import stores
+    return stores.listing(con)
 
 
 LOGIN = {}  # вход, запущенный из интерфейса: {"key", "started", "proc"}
@@ -621,7 +643,7 @@ def login_start(key):
     import sys
 
     from core import logins
-    if key not in logins.SOURCES:
+    if key not in logins.BROWSER_LOGIN:
         return jsonify(ok=False, error="неизвестный источник"), 404
     if login_running():
         return jsonify(ok=False, error=f"уже идёт вход: {logins.SOURCES[LOGIN['key']]} — закончи его в окне Chrome"), 409
@@ -663,21 +685,30 @@ def update_run():
 
 @app.get("/api/biedronka/session-status")
 def biedronka_session_status():
+    """Без ?check=1 — только по локальным данным (сеть при каждом открытии «Настроек» не трогаем):
+    missing — не подключали, expired — последняя загрузка получила отказ сайта, saved — сессия сохранена."""
     import requests
+    from core import logins
     from receipts import biedronka
 
+    folder = str(biedronka.CONNECTOR)
     if not biedronka.SESSION.exists():
-        return jsonify(status="missing")
+        return jsonify(status="missing", connector=folder)
+    if request.args.get("check") != "1":
+        dead = logins.state(connect(), "biedronka")["dead"]
+        return jsonify(status="expired" if dead else "saved", connector=folder)
     try:
         session = biedronka._load_session()
         if session is None:
-            return jsonify(status="missing")
+            return jsonify(status="missing", connector=folder)
         biedronka.verify_session(session, timeout=8)
     except biedronka.BiedronkaSessionExpired:
-        return jsonify(status="expired")
+        logins.record("biedronka", "expired")
+        return jsonify(status="expired", connector=folder)
     except requests.RequestException:
-        return jsonify(status="unavailable")
-    return jsonify(status="valid")
+        return jsonify(status="unavailable", connector=folder)
+    logins.alive("biedronka")
+    return jsonify(status="valid", connector=folder)
 
 
 @app.post("/api/biedronka/session-transfer/start")
@@ -714,6 +745,8 @@ def biedronka_session_transfer():
         session = biedronka.session_from_extension(body.get("user_agent"), body.get("cookies"))
         biedronka.verify_session(session)
         biedronka._save_session(session)
+        from core import logins
+        logins.record("biedronka")  # дата подключения и средний срок жизни сессии — в «Настройках»
     except (ValueError, biedronka.BiedronkaSessionExpired) as exc:
         return jsonify(ok=False, error=str(exc)), 400
     except requests.RequestException:

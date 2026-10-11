@@ -128,6 +128,15 @@ def since() -> str:
     return f"{d.day:02d}-{'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split()[d.month - 1]}-{d.year}"
 
 
+def bye(con):
+    """Выход из почты после работы. Всё скачанное уже сохранено: если Gmail успел закрыть соединение сам
+    («LOGOUT => socket error: EOF»), это не ошибка шага."""
+    try:
+        con.logout()
+    except (imaplib.IMAP4.error, OSError):
+        pass
+
+
 def headers():
     con, store = imap(), db()
     folder = all_mail_folder(con)
@@ -170,7 +179,7 @@ def headers():
                           "size, labels) VALUES (?,?,?,?,?,?,?,?,?)", rows)
         store.commit()
         print(f"  {min(n + 200, len(todo))}/{len(todo)}")
-    con.logout()
+    bye(con)
     print("Готово. Дальше: python budget.py mail senders")
 
 
@@ -235,7 +244,7 @@ def bodies():
                           (str(path.relative_to(DATA)).replace("\\", "/"), uid))
         store.commit()
         print(f"  {min(n + 25, len(uids))}/{len(uids)}")
-    con.logout()
+    bye(con)
 
 
 def main(argv: list[str]):

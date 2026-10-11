@@ -3,7 +3,7 @@ function markExtensionInstalled() {
   const marker = document.createElement("meta");
   marker.id = "home-budget-biedronka-extension";
   marker.name = "home-budget-biedronka-extension";
-  marker.content = "1.3.1";
+  marker.content = "1.3.0";
   document.documentElement.appendChild(marker);
 }
 

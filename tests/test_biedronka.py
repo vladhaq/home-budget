@@ -171,8 +171,11 @@ def test_sync_clamps_history_start_to_2023():
     assert requested == [(dt.date(2023, 1, 1), dt.date(2023, 1, 1))]
 
 
-def test_session_transfer_requires_and_consumes_one_time_pairing():
+def test_session_transfer_requires_and_consumes_one_time_pairing(tmp_path, monkeypatch):
     from app import server
+    from core import db
+
+    monkeypatch.setattr(db, "DB", tmp_path / "t.db")  # подключение записывается в журнал входов — во временную базу
 
     with server.BIEDRONKA_PAIRING_LOCK:
         previous_pairing = server.BIEDRONKA_PAIRING
@@ -232,10 +235,12 @@ def test_session_transfer_requires_and_consumes_one_time_pairing():
             server.BIEDRONKA_PAIRING = previous_pairing
 
 
-def test_session_status_distinguishes_missing_valid_expired_and_unavailable():
+def test_session_status_distinguishes_missing_valid_expired_and_unavailable(tmp_path, monkeypatch):
     from app import server
+    from core import db
     from requests import Timeout
 
+    monkeypatch.setattr(db, "DB", tmp_path / "t.db")  # журнал входов — во временной базе
     client = server.app.test_client()
     base_url = "http://127.0.0.1:8765"
     session_file = Mock()
@@ -250,13 +255,15 @@ def test_session_status_distinguishes_missing_valid_expired_and_unavailable():
         patch.object(biedronka, "_load_session", return_value=session),
         patch.object(biedronka, "verify_session"),
     ):
-        assert client.get("/api/biedronka/session-status", base_url=base_url).get_json()["status"] == "valid"
+        assert client.get("/api/biedronka/session-status?check=1", base_url=base_url).get_json()["status"] == "valid"
 
     with (
         patch.object(biedronka, "SESSION", session_file),
         patch.object(biedronka, "_load_session", return_value=session),
         patch.object(biedronka, "verify_session", side_effect=biedronka.BiedronkaSessionExpired),
     ):
+        assert client.get("/api/biedronka/session-status?check=1", base_url=base_url).get_json()["status"] == "expired"
+        # отказ записан — и без проверки по сети статус «истекла»
         assert client.get("/api/biedronka/session-status", base_url=base_url).get_json()["status"] == "expired"
 
     with (
@@ -264,7 +271,7 @@ def test_session_status_distinguishes_missing_valid_expired_and_unavailable():
         patch.object(biedronka, "_load_session", return_value=session),
         patch.object(biedronka, "verify_session", side_effect=Timeout),
     ):
-        assert client.get("/api/biedronka/session-status", base_url=base_url).get_json()["status"] == "unavailable"
+        assert client.get("/api/biedronka/session-status?check=1", base_url=base_url).get_json()["status"] == "unavailable"
 
 
 def test_biedronka_is_registered_as_an_update_source():

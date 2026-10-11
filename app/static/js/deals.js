@@ -73,13 +73,22 @@ function dealCard(d, q, m) {
   </div>`;
 }
 const dealGrid = (deals, q) => { const m = mine(q); return `<div class="dgrid">${deals.map(d => dealCard(d, q, m)).join("")}</div>`; };
+// магазины с газетками, включённые в «Настройках» → «Магазины»; выключенного здесь нет совсем
+const dealStores = () => (D.meta.deal_stores || Object.keys(STORE_NAME)).filter(k => STORE_NAME[k]);
 const storeTabs = () => {
-  const sum = D.meta.deals && D.meta.deals.stores || {};
-  return `<div class="tabs" data-key="dstore">${Object.entries(STORE_NAME).map(([k, n]) => `<button class="${S.dealStore === k ? "on" : ""}" data-dstore="${k}">${n}${
-    sum[k] && sum[k].deals ? ` <span class="badge">${sum[k].deals}</span>` : ""}</button>`).join("")}<button class="${S.dealStore === "compare" ? "on" : ""}"
-    data-dstore="compare">Где выгоднее</button></div>`;
+  const sum = D.meta.deals && D.meta.deals.stores || {}, on = dealStores();
+  return `<div class="tabs" data-key="dstore">${on.map(k => `<button class="${S.dealStore === k ? "on" : ""}" data-dstore="${k}">${STORE_NAME[k]}${
+    sum[k] && sum[k].deals ? ` <span class="badge">${sum[k].deals}</span>` : ""}</button>`).join("")}${on.length >= 2 ? `<button class="${S.dealStore === "compare" ? "on" : ""}"
+    data-dstore="compare">Где выгоднее</button>` : ""}</div>`;
 };
 async function renderDeals() {
+  const on = dealStores();
+  if (!on.length) {
+    document.getElementById("main").innerHTML = `<div class="empty">Магазины с газетками выключены — включи Lidl или Kaufland
+      в «Настройках» → «Магазины».</div>`;
+    return;
+  }
+  if (S.dealStore === "compare" ? on.length < 2 : !on.includes(S.dealStore)) { S.dealStore = on[0]; DEALS = null; DINFL = null; }
   if (S.dealStore === "compare") return renderCompare();
   if (!DEALS || DEALS.store !== S.dealStore) { DEALS = await (await fetch("/api/deals?" + sq())).json(); DINFL = null; }
   const X = DEALS, tg = X.telegram, name = STORE_NAME[S.dealStore], sum = D.meta.deals && D.meta.deals.stores || {};
@@ -131,28 +140,48 @@ function drawDealSearch() {
     ${DEALS.positions.some(p => foldTxt(p.q) === foldTxt(R.q)) ? "" : `<button class="chip" data-wadd-q="${esc(R.q)}">+ в постоянные позиции</button>`}</div>
     ${R.deals.length ? dealGrid(R.deals, R.q) : ""}`;
 }
-const chgRow = r => `<tr><td>${esc(r.title)} <span class="src">${esc(r.unit)}</span></td>
+// инфляция по чекам: регулярная цена (без акций) или самая выгодная (что реально заплатил со скидками)
+const IMODES = {regular: "регулярная цена", best: "самая выгодная цена"};
+let IMODE = (() => { try { return localStorage.getItem("budget-infl-mode") || "regular"; } catch (e) { return "regular"; } })();
+function setInflMode(m) {
+  IMODE = IMODES[m] ? m : "regular";
+  try { localStorage.setItem("budget-infl-mode", IMODE); } catch (e) { /* без хранилища — до перезагрузки */ }
+  drawInflation();
+}
+const chgRow = r => `<tr class="hrow" data-hq="${esc(r.title)}" title="история цены"><td>${esc(r.title)} <span class="src">${esc(r.unit)}</span>${r.season ? ` <span class="tag" title="овощи и фрукты: цена зависит от сезона, в среднее не входит">сезон</span>` : ""}${r.sure === false
+    ? ` <span class="tag" title="нижняя из цен — разовая покупка или короткий провал между более высокими: похоже на акцию, в среднее не входит">похоже на акцию</span>` : ""}</td>
   <td class="n">${zl(r.p0)} <span class="src">${ddmmyy(r.from)}</span></td><td class="n">${zl(r.p1)} <span class="src">${ddmmyy(r.to)}</span></td>
   <td class="n">${pct(r.pct)}</td>${r.n ? `<td class="n muted">${r.n}</td>` : ""}</tr>`;
 function drawInflation() {
   const box = document.getElementById("dinfl");
   if (!box || !DINFL) return;
   const R = DINFL.receipts, name = STORE_NAME[S.dealStore];
+  if (!R.modes) { box.innerHTML = `<p class="muted">Сервер работает на старой версии — перезапусти: python budget.py serve</p>`; return; }
+  const M = R.modes[IMODE];
   const head = `<tr><th>товар</th><th class="n">было</th><th class="n">стало</th><th class="n">изменение</th><th class="n">покупок</th></tr>`;
   const byQ = {}; for (const r of DINFL.rows) (byQ[r.q] ??= []).push(r);
   box.innerHTML = `<h3 style="margin:6px 0">Твоя инфляция по чекам ${name}</h3>${R.n ? `
-    <div class="cards"><div class="card">в среднем по твоим покупкам<b>${pct(R.avg)}</b>${R.n} товаров, купленных 4+ раза, с ${ddmmyy(R.since)}</div></div>
-    <p class="muted">Цена на полке (до скидки в чеке), начало — медиана первых трёх покупок, сейчас — последних трёх; среднее — с весом того,
-      сколько ты на товар тратишь. У весовых товаров — за кг; овощи и фрукты сильно зависят от сезона.</p>
-    <div class="infl2"><div><b>Подорожало сильнее всего</b><table>${head}${R.up.filter(r => r.pct > 0).map(chgRow).join("") || `<tr><td class="muted" colspan="5">ничего</td></tr>`}</table></div>
-      <div><b>Подешевело</b><table>${head}${R.down.map(chgRow).join("") || `<tr><td class="muted" colspan="5">ничего</td></tr>`}</table></div></div>`
+    <div class="tabs">${Object.entries(IMODES).map(([k, n]) => `<button class="${IMODE === k ? "on" : ""}" data-imode="${k}">${n}</button>`).join("")}</div>
+    <div class="cards"><div class="card">в среднем по твоим покупкам<b>${M.avg == null ? "—" : pct(M.avg)}</b>${M.n_avg} товаров, купленных 4+ раза, с ${ddmmyy(R.since)}</div></div>
+    <p class="muted">${IMODE === "regular"
+      ? `Регулярная цена — без акций: самая высокая цена на полке за первые и за последние ~3 месяца покупок (акции цену только
+         снижают, а в Kaufland акционная цена бывает прямо в чеке). Сколько ты заплатил со скидками — «самая выгодная цена»
+         и история товара (клик по строке).`
+      : `Самая выгодная цена — самая низкая, которую ты реально заплатил (со скидками и акциями) за первые и за последние
+         ~3 месяца покупок: насколько дороже стало покупать товар, если ловить акции.`}
+      Среднее — с весом того, сколько ты на товар тратишь, без овощей и фруктов (<span class="tag">сезон</span>) и без строк
+      <span class="tag">похоже на акцию</span> (нижняя цена — разовая покупка или короткий провал). Вкусы со своим кодом
+      товара не смешиваются. У весовых товаров — за кг, у фасованных с весом в названии — за кг/л.
+      ${R.stale ? `Ещё ${R.stale} товаров ты не покупал больше ${Math.round(R.stale_days / 30)} месяцев — их «стало» устарело, они не учтены.` : ""}</p>
+    <div class="infl2"><div><b>Подорожало сильнее всего</b><table>${head}${M.up.map(chgRow).join("") || `<tr><td class="muted" colspan="5">ничего</td></tr>`}</table></div>
+      <div><b>Подешевело</b><table>${head}${M.down.map(chgRow).join("") || `<tr><td class="muted" colspan="5">ничего</td></tr>`}</table></div></div>`
     : `<p class="muted">Пока мало повторных покупок в ${name}: нужен товар, купленный 4+ раза за 2+ месяца.</p>`}
     <h3 style="margin:14px 0 6px">Постоянные позиции</h3>
-    <table><tr><th>позиция</th><th>по твоим чекам</th><th>по газеткам ${name}</th></tr>${R.positions.map(p => {
-      const rc = p.receipts, fl = byQ[p.q] || [];
+    <table><tr><th>позиция</th><th>по твоим чекам (${IMODES[IMODE]})</th><th>по газеткам ${name}</th></tr>${R.positions.map(p => {
+      const rc = p[IMODE], fl = byQ[p.q] || [];
       return `<tr><td><b>${esc(p.q)}</b></td>
-        <td>${rc ? `${esc(rc.title)}: ${zl(rc.p0)} → ${zl(rc.p1)} <span class="src">${esc(rc.unit)}</span> ${pct(rc.pct)}<div class="muted" style="font-size:.85em">${ddmmyy(rc.from)} – ${ddmmyy(rc.to)}, ${rc.n} покупок</div>`
-          : `<span class="muted">мало покупок в ${name}</span>`}</td>
+        <td>${rc ? `${esc(p.title)}: ${zl(rc.p0)} → ${zl(rc.p1)} <span class="src">${esc(rc.unit)}</span> ${pct(rc.pct)}<div class="muted" style="font-size:.85em">${ddmmyy(rc.from)} – ${ddmmyy(rc.to)}, ${rc.n} покупок</div>`
+          : `<span class="muted">${p.title ? `${esc(p.title)}: мало покупок — сравнить не с чем` : `в чеках ${name} не встречался`}</span>`}</td>
         <td>${fl.length ? fl.map(r => `${esc(r.title)}: ${zl(r.p0)} → ${zl(r.p1)} <span class="src">${esc(r.unit)}</span> ${pct(r.pct)}`).join("<br>")
           : `<span class="muted">нужны записи из двух разных газеток — копятся при каждом обновлении</span>`}</td></tr>`; }).join("")}</table>`;
 }
@@ -163,8 +192,10 @@ function drawHistory() {
   const name = STORE_NAME[S.dealStore], R = DHIST.receipts || [], F = DHIST.items || [];
   if (!R.length && !F.length) { box.innerHTML = `<p class="muted">«${esc(DHIST.q)}»: ни в чеках, ни в газетках ${name} не встречался.</p>`; return; }
   box.innerHTML = R.map((h, i) => `<div class="hcard"><h3>${esc(h.title)} <span class="src">по чекам</span></h3>
-      <div class="muted">${h.rows.length} покупок с ${ddmmyy(h.rows[0].date)}${h.change ? ` · ${zl(h.change.p0)} → ${zl(h.change.p1)} (${esc(h.change.unit)}) ${pct(h.change.pct)}` : ""}
-        · последняя ${ddmmyy(h.rows[h.rows.length - 1].date)}: ${zl(h.rows[h.rows.length - 1].price)}</div>
+      <div class="muted">${h.rows.length} покупок с ${ddmmyy(h.rows[0].date)}${h.change ? ` · регулярная цена ${zl(h.change.p0)} → ${zl(h.change.p1)} (${esc(h.change.unit)}) ${pct(h.change.pct)}` : ""}
+        ${h.best ? ` · самая выгодная ${zl(h.best.p0)} → ${zl(h.best.p1)} ${pct(h.best.pct)}` : ""}
+        · последняя ${ddmmyy(h.rows[h.rows.length - 1].date)}: ${zl(h.rows[h.rows.length - 1].price)}${h.rows[h.rows.length - 1].paid < h.rows[h.rows.length - 1].price - 0.005
+          ? `, заплатил ${zl(h.rows[h.rows.length - 1].paid)}` : ""}</div>
       <div class="chartbox inner"><canvas id="hr${i}" height="70"></canvas></div></div>`).join("") +
     F.map((h, i) => `<div class="hcard"><h3>${esc(h.title)} <span class="src">по газеткам</span></h3>
     <div class="muted">${h.rows.length} записей с ${ddmmyy(h.rows[0].start)}${h.change ? ` · обычная цена ${zl(h.change.p0)} → ${zl(h.change.p1)} (${esc(h.unit)}) ${pct(h.change.pct)}` : ""}

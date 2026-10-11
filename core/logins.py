@@ -10,7 +10,8 @@ import json
 
 from core.db import connect, get_meta, set_meta
 
-SOURCES = {"lidl": "Lidl Plus", "kaufland": "Kaufland", "bank": "банк"}
+SOURCES = {"lidl": "Lidl Plus", "kaufland": "Kaufland", "bank": "банк", "biedronka": "Biedronka"}
+BROWSER_LOGIN = {"lidl", "kaufland", "bank"}  # вход окном Chrome (budget.py <key> login); Biedronka — через расширение
 
 
 def now() -> str:
@@ -63,7 +64,9 @@ def token_info(key: str) -> dict:
     """Что видно из файла токена: {"since": дата входа, "until": до какого срока действует}."""
     from bank import enablebanking
     from receipts import kaufland, lidl
-    path = {"lidl": lidl.TOKEN, "kaufland": kaufland.TOKEN, "bank": enablebanking.SESSION}[key]
+    path = {"lidl": lidl.TOKEN, "kaufland": kaufland.TOKEN, "bank": enablebanking.SESSION}.get(key)
+    if path is None:  # Biedronka: сессия перезаписывается при каждой загрузке — дата входа только из журнала
+        return {}
     try:
         t = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
