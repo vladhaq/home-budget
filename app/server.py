@@ -412,7 +412,7 @@ def _deals_summary():
 
 def _store():
     s = (request.args.get("store") or (request.get_json(silent=True) or {}).get("store") or "lidl").lower()
-    return s if s in ("lidl", "kaufland") else "lidl"
+    return s if s in ("lidl", "kaufland", "biedronka") else "lidl"
 
 
 @app.get("/api/deals")
@@ -752,6 +752,17 @@ def biedronka_session_transfer():
     except requests.RequestException:
         return jsonify(ok=False, error="Не удалось проверить cookies на сайте Biedronka"), 502
     return jsonify(ok=True, cookies=len(session.cookies))
+
+
+@app.post("/api/update/steps")
+def update_steps_set():
+    """Шаг участвует в «Обновить всё» и автозапуске или нет (переключатель в строке источника)."""
+    b = request.get_json()
+    try:
+        update.set_skipped(b.get("key"), not b.get("on"))
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    return jsonify(ok=True)
 
 
 @app.post("/api/update/schedule")

@@ -59,10 +59,13 @@ def set_remind_at(hhmm: str):
 
 
 def src(store: str = "lidl"):
-    """Модуль газеток магазина: у обоих — INDEX, update(), search(), previous_price(), find_history()."""
+    """Модуль газеток магазина: у всех — INDEX, update(), search(), previous_price(), find_history(), watchlist()."""
     if store == "kaufland":
         from core import kaufland_deals
         return kaufland_deals
+    if store == "biedronka":
+        from core import biedronka_deals
+        return biedronka_deals
     return mod()
 
 
@@ -75,7 +78,7 @@ def deal_json(d: dict, sent: set, store: str = "lidl") -> dict:
     today = L.today().isoformat()
     key = L.deal_key(d)
     out = {k: d.get(k) for k in ("title", "price", "approx", "old_price", "discount", "size", "unit", "unit_price",
-                                 "unit_regular", "start", "end", "flyer", "url", "conditions", "supercena", "page")}
+                                 "unit_regular", "start", "end", "flyer", "url", "conditions", "supercena", "page", "ocr")}
     out.update(key=key, status=L.status(d), reminded=key in sent, upcoming=d["start"] > today, store=store,
                no_discount=d["price"] is not None and d["old_price"] is None and not d["discount"])
     if out["no_discount"] and (prev := src(store).previous_price(d)):
@@ -95,10 +98,10 @@ def search(query: str, idx=None, store: str = "lidl") -> list[dict]:
 def summary() -> dict:
     """Для списка разделов: сколько акций на постоянные позиции в обоих магазинах. Кэш — пока не поменялись газетки и список."""
     L = mod()
-    from core import kaufland_deals as K
     from core import stores
     on = tuple(stores.deal_stores())  # только включённые в «Настройках» магазины
-    stamp = tuple(p.stat().st_mtime if p.exists() else 0 for p in (L.INDEX, K.INDEX, L.WATCH, K.WATCH)) + (L.today().isoformat(), on)
+    files = [f for s in on for f in (src(s).INDEX, src(s).WATCH)]
+    stamp = tuple(p.stat().st_mtime if p.exists() else 0 for p in files) + (L.today().isoformat(), on)
     if _summary.get("stamp") != stamp:
         data = {"updated": None, "flyers": 0, "deals": 0, "stores": {}}
         for store in on:
@@ -169,7 +172,8 @@ def auto() -> dict:
     from core import stores
     for store in stores.deal_stores():  # выключенный магазин: газетки не качаем, о его акциях не напоминаем
         try:
-            idx = src(store).update(verbose=False)
+            # газетки Biedronka распознаются своим шагом («Газетки Biedronka»), тут — только их напоминания
+            idx = index(store) if store == "biedronka" else src(store).update(verbose=False)
         except Exception as e:  # noqa: BLE001 — сайт магазина недоступен
             errors.append(f"{store}: {e}")
             idx = index(store)
@@ -264,7 +268,7 @@ def all_deals(store: str) -> list[dict]:
         return _ALL[store][1]
     idx, today, seen = index(store), L.today().isoformat(), {}
     if idx:
-        if store == "kaufland":
+        if store in ("kaufland", "biedronka"):
             found = (d for slug, f in idx["flyers"].items() for d in S.deals_of(f, slug))
         else:
             found = (L.build_deal(f, slug, pno, page, b) for slug, f in idx["flyers"].items()
@@ -289,26 +293,37 @@ def _value(d: dict):
     return None, None
 
 
-def _pair(kind: str, label: str, a: dict, b: dict, sent: set):
-    va, ba = _value(a)
-    vb, bb = _value(b)
-    if va is None or vb is None or ba != bb:
+def _row(kind: str, label: str, offers: dict, sent: set):
+    """Строка сравнения: лучшая акция в каждом магазине (за кг/л или за одинаковую упаковку), где дешевле и на сколько
+    дороже в самом дорогом. Нужно хотя бы два магазина с одной основой сравнения."""
+    vals = {s: (d, *_value(d)) for s, d in offers.items() if d}
+    bases = {}
+    for s, (d, v, basis) in vals.items():
+        if v is not None:
+            bases.setdefault(basis, {})[s] = (d, v)
+    basis, best = max(bases.items(), key=lambda x: len(x[1]), default=(None, {}))
+    if len(best) < 2:
         return None
-    cheaper = "lidl" if va < vb else "kaufland" if vb < va else None
-    pct = round(abs(va - vb) / max(va, vb) * 100) if cheaper else 0
-    return {"kind": kind, "label": label, "basis": ba, "cheaper": cheaper, "pct": pct,
-            "lidl": deal_json(a, sent, "lidl") | {"value": va}, "kaufland": deal_json(b, sent, "kaufland") | {"value": vb}}
+    lo = min(best, key=lambda s: best[s][1])
+    hi = max(v for _, v in best.values())
+    cheaper = lo if best[lo][1] < hi else None
+    return {"kind": kind, "label": label, "basis": basis, "cheaper": cheaper,
+            "pct": round((hi - best[lo][1]) / hi * 100) if cheaper else 0,
+            "offers": {s: deal_json(d, sent, s) | {"value": v} for s, (d, v) in best.items()}}
 
 
 def compare() -> dict:
-    """Одинаковое в обоих магазинах сейчас: мясо по видам, одна и та же марка, твои постоянные позиции."""
+    """Одинаковое сейчас в разных магазинах (включённых, с газетками): мясо по видам, одна и та же марка,
+    твои постоянные позиции."""
+    from core import stores
     L = mod()
     sent = set(L.load_json(L.SENT, []))
-    lidl, kauf = all_deals("lidl"), all_deals("kaufland")
-    pairs, used = [], set()
+    on = stores.deal_stores()
+    deals = {s: all_deals(s) for s in on}
+    rows = []
 
-    def cheapest(deals):
-        vals = [(v, d) for d in deals for v, _ in [_value(d)] if v is not None]
+    def cheapest(ds):
+        vals = [(v, d) for d in ds for v, _ in [_value(d)] if v is not None]
         return min(vals, key=lambda x: x[0])[1] if vals else None
 
     def meat_kind(d):  # вид мяса (первый подходящий), только сырое и с правдоподобной ценой за кг
@@ -318,10 +333,8 @@ def compare() -> dict:
         return next((label for label, rx in MEAT if re.search(rx, f)), None)
 
     for label, _ in MEAT:  # мясо: самое дешёвое за кг в каждом магазине
-        a = cheapest([d for d in lidl if meat_kind(d) == label])
-        b = cheapest([d for d in kauf if meat_kind(d) == label])
-        if a and b and (p := _pair("meat", label, a, b, sent)):
-            pairs.append(p)
+        if r := _row("meat", label, {s: cheapest([d for d in ds if meat_kind(d) == label]) for s, ds in deals.items()}, sent):
+            rows.append(r)
 
     def brand(d):
         first = (d["title"].split() or [""])[0]
@@ -329,34 +342,32 @@ def compare() -> dict:
         return f if len(f) >= 3 and first.upper() == first and any(c.isalpha() for c in first) and f not in NOT_BRAND else None
 
     words = lambda d: {w for w in re.findall(r"[a-z]{4,}", L.fold(d["title"])) if w not in STOP}  # noqa: E731
-    by_brand = {}
-    for d in lidl:
-        if (br := brand(d)):
-            by_brand.setdefault(br, []).append(d)
+
     def similar(a, b, br):  # тот же товар марки: совпадает хотя бы половина слов названия (без марки)
         wa, wb = words(a) - {br}, words(b) - {br}
         return bool(wa and wb) and len(wa & wb) / len(wa | wb) >= 0.5
 
-    for b in kauf:  # одна марка, тот же товар («ZOTT Primo Skyr» и «ZOTT Primo Skyr naturalny»)
-        br = brand(b)
-        if not br or br not in by_brand:
-            continue
-        cands = [a for a in by_brand[br] if similar(a, b, br)]
-        a = cheapest(cands)
-        if a and (L.deal_key(a), L.deal_key(b)) not in used and (p := _pair("brand", br.upper(), a, b, sent)):
-            used.add((L.deal_key(a), L.deal_key(b)))
-            pairs.append(p)
+    used = set()
+    for i, s in enumerate(on):  # одна марка, тот же товар («ZOTT Primo Skyr» и «ZOTT Primo Skyr naturalny»)
+        for d in deals[s]:
+            br = brand(d)
+            if not br or L.deal_key(d) in used:
+                continue
+            offers = {s: d}
+            for o in on[i + 1:]:
+                offers[o] = cheapest([x for x in deals[o] if brand(x) == br and similar(d, x, br) and L.deal_key(x) not in used])
+            if sum(1 for x in offers.values() if x) >= 2 and (r := _row("brand", br.upper(), offers, sent)):
+                used.update(L.deal_key(x) for x in offers.values() if x)
+                rows.append(r)
 
-    from core import kaufland_deals as K
     def titled(q, ds):  # акция, где запрос есть в самом названии (а не в соседнем тексте газетки)
         toks = [x for x in L.fold(q).split() if len(x) > 2]
         return [d for d in ds if all(any(L.word_matches(w, x) for w in re.findall(r"\w+", L.fold(d["title"]))) for x in toks)]
 
-    for q in dict.fromkeys(L.watchlist() + K.watchlist()):  # постоянные позиции из обоих списков
-        a = cheapest(titled(q, src("lidl").search(index("lidl"), q))) if index("lidl") else None
-        b = cheapest(titled(q, src("kaufland").search(index("kaufland"), q))) if index("kaufland") else None
-        if a and b and (p := _pair("position", q, a, b, sent)):
-            pairs.append(p)
+    for q in dict.fromkeys(q for s in on for q in src(s).watchlist()):  # постоянные позиции из всех списков
+        offers = {s: cheapest(titled(q, src(s).search(index(s), q))) if index(s) else None for s in on}
+        if r := _row("position", q, offers, sent):
+            rows.append(r)
     order = {"position": 0, "meat": 1, "brand": 2}
-    pairs.sort(key=lambda p: (order[p["kind"]], -p["pct"]))
-    return {"pairs": pairs, "lidl": len(lidl), "kaufland": len(kauf)}
+    rows.sort(key=lambda r: (order[r["kind"]], -r["pct"]))
+    return {"stores": on, "counts": {s: len(ds) for s, ds in deals.items()}, "rows": rows}

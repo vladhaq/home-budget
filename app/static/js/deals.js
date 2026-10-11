@@ -1,7 +1,7 @@
 // Страница «Скидки»: газетки Lidl и Kaufland (вкладки), постоянные позиции, поиск, напоминания,
 // цены по твоим чекам (личная инфляция, история) и по газеткам.
 let DEALS = null, DSEARCH = null, DINFL = null, DHIST = null, dCharts = [];
-const STORE_NAME = {lidl: "Lidl", kaufland: "Kaufland"};
+const STORE_NAME = {lidl: "Lidl", kaufland: "Kaufland", biedronka: "Biedronka"};
 let DCMP = null;
 S.dealStore = (() => { try { return localStorage.getItem("budget-deal-store") || "lidl"; } catch (e) { return "lidl"; } })();
 const sq = () => "store=" + S.dealStore;
@@ -62,8 +62,9 @@ function dealCard(d, q, m) {
     <div class="dprice"><b>${price}</b>${d.old_price != null && d.old_price !== d.price ? `<s>${zl(d.old_price)}</s>` : ""}
       ${d.size ? ` <span class="muted">${esc(d.size)}</span>` : ""}</div>
     ${d.unit_price ? `<div class="muted">${zl(d.unit_price)} за ${esc(d.unit)}${d.unit_regular && d.unit_regular !== d.unit_price ? ` (обычно ${zl(d.unit_regular)})` : ""}</div>` : ""}
-    ${d.approx ? `<div class="muted">≈ — цена рассчитана по цене за кг/л из газетки, проверь на странице</div>` : ""}
-    ${d.no_discount ? `<div class="muted">${d.prev ? `в газетке от ${ddmm(d.prev.start)} было ${zl(d.prev.price)}` : "скидки нет — обычная цена из газетки"}</div>` : ""}
+    ${d.ocr ? `<div class="muted">распознано с картинки газетки — проверь цену на странице</div>`
+      : d.approx ? `<div class="muted">≈ — цена рассчитана по цене за кг/л из газетки, проверь на странице</div>` : ""}
+    ${d.no_discount ? `<div class="muted">${d.prev ? `в газетке от ${ddmm(d.prev.start)} было ${zl(d.prev.price)}` : d.ocr ? "скидку распознать не удалось" : "скидки нет — обычная цена из газетки"}</div>` : ""}
     ${cmp != null && cmp < -0.03 ? `<div class="save">${byUnit ? "за " + m.puUnit + " " : ""}дешевле, чем ты обычно платишь (${usual}), на ${Math.round(-cmp * 100)}%</div>`
       : cmp != null && cmp > 0.03 ? `<div class="muted">ты обычно платишь меньше: ${usual}</div>` : ""}
     ${(d.conditions || []).map(c => `<div class="cond">• ${esc(c)}</div>`).join("")}
@@ -102,9 +103,16 @@ async function renderDeals() {
         : `🔕 напоминания в Telegram — после первого входа: ${cmd("python budget.py telegram")}`}</span>
     </div>
     <div class="flyers">${X.flyers.map(f => `<span class="chip">${esc(f.name)} · ${ddmm(f.start)}–${ddmm(f.end)}</span>`).join("")}</div>
-    <p class="muted">Газетки обоих магазинов и напоминания по постоянным позициям обновляются сами в «обновить всё» (шаг «Газетки»).${
+    ${S.dealStore === "biedronka" ? `<div class="updbox warnbox">⚠ Газетки Biedronka есть только картинками — страницы распознаются,
+      поэтому названия, цены и скидки могут быть неточными. Основная цена считается по цене за кг/л и весу (≈). Перед покупкой
+      проверь по ссылке «газетка, стр. N».</div>` : ""}
+    <p class="muted">${S.dealStore === "biedronka"
+      ? `Газетки Biedronka (продуктовые, «Codziennie niskie ceny») распознаются в «обновить всё» отдельным шагом «Газетки Biedronka
+         (распознавание)» — новая газетка занимает несколько минут; шаг можно выключить в «Настройках» → «Источники», если нужны
+         только чеки. Напоминания по постоянным позициям — в шаге «Газетки».`
+      : `Газетки и напоминания по постоянным позициям обновляются сами в «обновить всё» (шаг «Газетки»).${
       S.dealStore === "kaufland" ? ` У Kaufland цены в газетке разбросаны вокруг описания товара — где цена не нашлась рядом, она
-      рассчитана по цене за кг/л (≈); всегда можно открыть страницу газетки.` : ""}</p>
+      рассчитана по цене за кг/л (≈); всегда можно открыть страницу газетки.` : ""}`}</p>
 
     <h2>Постоянные позиции</h2>
     <div class="updbox"><span class="wlist">${X.positions.map(p => `<span class="wchip">${esc(p.q)}<button type="button" data-wrm="${esc(p.q)}"
@@ -241,21 +249,25 @@ async function refreshDeals() { DEALS = null; DINFL = null; const y = scrollY; a
 const CMP_KIND = {position: "Твои постоянные позиции", meat: "Мясо — по цене за кг", brand: "Одна и та же марка"};
 async function renderCompare() {
   if (!DCMP) DCMP = await (await fetch("/api/deals/compare")).json();
-  const cell = (d, win) => `<td class="${win ? "cwin" : ""}"><div><b>${d.approx ? "≈" : ""}${zl(d.value)}</b> <span class="muted">${esc(d.basis || "")}</span>
-      ${win ? `<span class="st" style="--c:var(--green)">выгоднее</span>` : ""}</div>
+  const ST = DCMP.stores || [];
+  const cell = (d, win) => !d ? `<td class="muted">—</td>` : `<td class="${win ? "cwin" : ""}"><div><b>${d.approx ? "≈" : ""}${zl(d.value)}</b>
+      <span class="muted">${esc(d.basis || "")}</span>${win ? ` <span class="st" style="--c:var(--green)">выгоднее</span>` : ""}
+      ${d.ocr ? ` <span class="tag" title="распознано с картинки газетки — может быть неточно">распознано</span>` : ""}</div>
     <div>${esc(d.title)}</div><div class="muted">${d.price != null ? zl(d.price) : ""}${d.size ? " · " + esc(d.size) : ""}${d.discount ? ` · −${d.discount}%` : ""}
       · ${esc(d.status)} · <a href="${esc(d.url)}" target="_blank">стр. ${d.page} ↗</a></div></td>`;
   const groups = {};
-  for (const p of DCMP.pairs) (groups[p.kind] ??= []).push(p);
+  for (const r of DCMP.rows || []) (groups[r.kind] ??= []).push(r);
   document.getElementById("main").innerHTML = `${storeTabs()}
-    <p class="muted">Текущие и будущие акции обоих магазинов (Lidl: ${DCMP.lidl}, Kaufland: ${DCMP.kaufland}), где можно сравнить одинаковое:
-      мясо — один вид, самое дешёвое за кг в каждом магазине (сырое, без колбас и полуфабрикатов); марка — тот же товар одной марки;
-      и твои постоянные позиции. Сравнение — за кг/л или за одинаковую упаковку. Цены — из газеток; «≈» — рассчитано по цене за кг/л.</p>
+    <p class="muted">Текущие и будущие акции магазинов (${ST.map(s => `${STORE_NAME[s]}: ${(DCMP.counts || {})[s] || 0}`).join(", ")}), где
+      можно сравнить одинаковое: мясо — один вид, самое дешёвое за кг в каждом магазине (сырое, без колбас и полуфабрикатов); марка —
+      тот же товар одной марки; и твои постоянные позиции. Сравнение — за кг/л или за одинаковую упаковку, «разница» — от самого
+      дорогого. Цены — из газеток; «≈» — рассчитано по цене за кг/л.${ST.includes("biedronka")
+      ? " Цены Biedronka распознаны с картинок газеток — могут быть неточными." : ""}</p>
     ${Object.keys(CMP_KIND).filter(k => groups[k]).map(k => `<h2>${CMP_KIND[k]}</h2>
-      <table class="cmp"><tr><th>что</th><th>Lidl</th><th>Kaufland</th><th class="n">разница</th></tr>${groups[k].map(p => `<tr>
-        <td><b>${esc(p.label)}</b></td>${cell({...p.lidl, basis: p.basis}, p.cheaper === "lidl")}${cell({...p.kaufland, basis: p.basis}, p.cheaper === "kaufland")}
-        <td class="n">${p.cheaper ? `<b class="save">−${p.pct}%</b><div class="muted">в ${STORE_NAME[p.cheaper]}</div>` : `<span class="muted">одинаково</span>`}</td></tr>`).join("")}</table>`).join("")
-      || `<div class="empty">Сейчас одинаковых акций в обоих магазинах не нашлось — обнови газетки на вкладках Lidl и Kaufland.</div>`}`;
+      <table class="cmp"><tr><th>что</th>${ST.map(s => `<th>${STORE_NAME[s]}</th>`).join("")}<th class="n">разница</th></tr>${groups[k].map(r => `<tr>
+        <td><b>${esc(r.label)}</b></td>${ST.map(s => cell(r.offers[s] && {...r.offers[s], basis: r.basis}, r.cheaper === s)).join("")}
+        <td class="n">${r.cheaper ? `<b class="save">−${r.pct}%</b><div class="muted">в ${STORE_NAME[r.cheaper]}</div>` : `<span class="muted">одинаково</span>`}</td></tr>`).join("")}</table>`).join("")
+      || `<div class="empty">Сейчас одинаковых акций в разных магазинах не нашлось — обнови газетки на вкладках магазинов.</div>`}`;
   placeIndicators();
 }
 

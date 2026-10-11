@@ -295,14 +295,34 @@ def parse_units(hit_text: str, cell_low: str, discounted: bool):
     low = hit_text.lower()
     cut = min((low.find(k) for k in REGULAR_MARKERS if k in low), default=len(low))
     promo_m = UNIT_PRICE_RE.search(low[:cut])
-    pos = min((cell_low.find(k) for k in REGULAR_MARKERS if k in cell_low), default=-1)
-    reg_m = UNIT_PRICE_RE.search(cell_low[pos:]) if pos >= 0 else None
+    # обычная цена за кг — сначала в блоке самого товара: в ячейку попадают и соседние товары со своими ценами
+    reg_m = UNIT_PRICE_RE.search(low[cut:]) if cut < len(low) else None
+    if not reg_m:
+        pos = min((cell_low.find(k) for k in REGULAR_MARKERS if k in cell_low), default=-1)
+        reg_m = UNIT_PRICE_RE.search(cell_low[pos:]) if pos >= 0 else None
     promo_u = norm(promo_m) if promo_m else None
     reg_u = norm(reg_m) if reg_m else None
     if not discounted and promo_u and not reg_u:
         reg_u = promo_u  # скидки нет — цена за кг в карточке и есть обычная
     unit = (promo_u or reg_u or (None,))[0]
     return unit, promo_u[1] if promo_u else None, reg_u[1] if reg_u and reg_u[0] == unit else None
+
+
+def pack_qty(size: str | None, unit: str | None) -> float | None:
+    """Сколько кг/л в упаковке: «500 g» → 0.5, «4 x 100 g» → 0.4, «1,5 l» → 1.5. Только для той же единицы, что цена."""
+    # однозначный размер: «500 g», «4 x 150 g»; «165 g, 175 g» (варианты) — первый, цена за кг в газетке — по нему;
+    # «33-45 g» и «100 g = 4,61» — нет
+    sizes = [s.strip() for s in (size or "").lower().split(",")]
+    one_rx = r"(?:(\d+)\s*[x×]\s*)?(\d+(?:[.,]\d+)?)\s*(kg|g|l|ml)\.?"
+    if not sizes or not all(re.fullmatch(one_rx, s) for s in sizes):
+        return None
+    m = re.fullmatch(one_rx, sizes[0])
+    if not m or not unit:
+        return None
+    n, v, u = int(m.group(1) or 1), float(m.group(2).replace(",", ".")), m.group(3)
+    if (u in ("kg", "g")) != (unit == "kg"):
+        return None
+    return n * (v / 1000 if u in ("g", "ml") else v)
 
 
 def build_deal(flyer: dict, slug: str, pno: int, page: dict, hit: list) -> dict:
@@ -314,7 +334,9 @@ def build_deal(flyer: dict, slug: str, pno: int, page: dict, hit: list) -> dict:
     low = text.lower()
 
     old = None
-    m = re.search(r"(?:przed obniżką|poza promocją|najniższa cena z 30 dni)[^:]*:\s*(?:1 kg = |1 l = )?(\d+,\d{2})", low)
+    # обычная цена — сначала в блоке самого товара (в ячейке бывает и фраза соседнего: «Flaki» брали цену «Schab»)
+    old_rx = r"(?:przed obniżką|poza promocją|najniższa cena z 30 dni)[^:]*:\s*(?:1 kg = |1 l = )?(\d+,\d{2})"
+    m = re.search(old_rx, hit[4].lower()) or re.search(old_rx, low)
     if m:
         old = to_float(m.group(1))
     prices = sorted({to_float(ln) for ln in lines if PRICE_RE.match(ln)})
@@ -396,6 +418,22 @@ def build_deal(flyer: dict, slug: str, pno: int, page: dict, hit: list) -> dict:
         unit = one.group(1)
         unit_price = unit_price or promo
         unit_regular = unit_regular or old or (promo if not discounts else None)
+    # цена нарисована картинкой, а в ячейке — цена или «−50%» соседнего товара: цена расходится с ценой за кг/л
+    # из блока самого товара («500 g, 1 kg = 27,98» — это 13,99, а не 15,99 × 0,5). Верим цене за кг, скидку пересчитываем
+    qty = pack_qty(size, unit)
+    if not bundle and unit_price and qty and not one:
+        by_unit = round(unit_price * qty, 2)
+        # цена за кг в блоке бывает обычной, а не акционной — тогда она ничего не говорит о цене по акции
+        promo_unit = not (unit_regular and abs(unit_price - unit_regular) < 0.01) and not (old and by_unit >= old * 0.98)
+        # цена из текста, которая сходится с заявленной скидкой, — верная, её не трогаем
+        agrees = (promo is not None and not approx and old and discounts
+                  and abs(promo - old * (1 - max(discounts) / 100)) / promo <= 0.03)
+        # вычисленная из скидки цена (≈) — всегда уступает цене из цены за кг: та точнее (15,99 × 0,88 = 14,07, а в газетке 13,99)
+        if promo_unit and not agrees and (promo is None or approx or abs(promo - by_unit) / by_unit > 0.05):
+            promo, approx = by_unit, True
+            if old and old > promo:
+                pct = (1 - promo / old) * 100
+                discount = next((d for d in discounts if abs(d - pct) <= 1), int(pct))  # Lidl округляет вниз: 12,5% → −12%
 
     return {"title": title_of(hit[4]), "price": promo, "approx": approx, "old_price": old,
             "size": size, "unit": unit, "unit_price": unit_price, "unit_regular": unit_regular,

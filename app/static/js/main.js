@@ -135,6 +135,11 @@ document.addEventListener("click", async e => {
     renderCategories(); return;
   }
   if (t.dataset.dstore) { switchStore(t.dataset.dstore); return; }
+  if (t.dataset.dupdate && S.dealStore === "biedronka") {  // распознавание — минуты: шагом обновления, ход виден в «Настройках»
+    await startUpdate(["biedronka_flyers"]);
+    toast("Распознаю газетки Biedronka — несколько минут, ход виден в «Настройках»");
+    return;
+  }
   if (t.dataset.dupdate) {
     const j = await dealsAction(() => post("/api/deals/update", {store: S.dealStore}), `Скачиваю свежие газетки ${STORE_NAME[S.dealStore]}…`);
     if (j) { await refreshDeals(); toast(`Газетки обновлены: ${j.flyers}`); }
@@ -295,6 +300,7 @@ document.addEventListener("click", async e => {
 document.addEventListener("change", async e => {
   const t = e.target;
   if (t.dataset.store) { await setStore(t.dataset.store, t.checked); return; }  // «Настройки» → «Магазины»
+  if (t.dataset.autostep) { await setAutoStep(t.dataset.autostep, t.checked); return; }  // шаг в «Обновить всё»
   if (t.dataset.f) { S.F[t.dataset.f] = t.value; render(); return; }
   if (t.dataset.only) { const p = PENDING.get(t.dataset.only); if (p) p.mode = t.checked ? "item" : "same"; }
 });
