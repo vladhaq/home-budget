@@ -122,3 +122,37 @@ def test_notes(note, key):
 def test_shop_key(name, key):
     from core.categories import shop_key
     assert shop_key(name) == key
+
+
+@pytest.mark.parametrize("name, key", [  # урезанные слитные названия Biedronka
+    ("KolCiasBonitki700g", "food.sweets"), ("Cz Milka Alpin100g", "food.sweets"),
+    ("Mi mie wp wot 400g C 1.000 Xx", "food.meat"), ("ParBerlMix250 g", "food.sausage"),
+    ("MLEK WYPAS 3,2 1L", "food.dairy"), ("Chl Wiejski 500g", "food.bread"), ("MakFalDobrusia750g", "food.grains"),
+    ("Kukur NaszSpiż285g", "food.grocery"), ("Pas Elmex Sens 75m", "health.hygiene"),
+    ("ZelUdrozRurKretlkg A 1.000 Xx", "home.chem"), ("RękaLatZosSamRozMx50", "home.chem"),
+    ("WorZosiaWigzan60Ix]1]", "home.chem"), ("Podg ArilMix 18szt", "home.furniture"),
+])
+def test_biedronka_abbreviations(name, key):
+    assert keyword_category(name) == key
+
+
+@pytest.mark.parametrize("text, key", [  # вейп — и в названии позиции, и в твоём комментарии к операции банка
+    ("Liquidy Test 30ml 20mg - Mango Ice", "vice.tobacco"),
+    ("SALT TPD TEST 20MG 10ML - MIETOWA", "vice.tobacco"), ("Liquid Mango Ice 20mg", "vice.tobacco"),
+    ("Magnez 400mg", "health.vitamins"), ("Sól kuchenna 1kg", "food.grocery"),
+])
+def test_vape(text, key):
+    assert keyword_category(text) == key and note_category(text) == key
+
+
+@pytest.mark.parametrize("note, lang, key", [  # комментарии: сначала свой язык, потом польский словарь, потом другой язык
+    ("кофе с собой", "ru", "leisure.cafe"), ("coffee to go", "en", "leisure.cafe"),
+    ("coffee to go", "ru", "leisure.cafe"),  # английский — и при русском интерфейсе (после польского словаря)
+    ("лекарство от головы", "en", "health.pharmacy"),  # русский — и при английском
+    ("pasta and rice", "en", "food.grains"),  # по-английски «pasta» — макароны
+    ("pasta do zębów", "en", "health.hygiene"),  # польская фраза целиком — польский словарь
+    ("kawa ziarnista", "en", "food.coffee"),
+    ("что-то непонятное", "en", None),
+])
+def test_note_languages(note, lang, key):
+    assert note_category(note, lang) == key

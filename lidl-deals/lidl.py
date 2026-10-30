@@ -778,7 +778,12 @@ def reminder_text(d: dict, at) -> str:
         head = f"🛒 {d.get('store', 'Lidl')}: завтра ({fmt_date(d['start'])}) дешевле обычного — стоит зайти в магазин"
     else:
         head = f"🛒 {d.get('store', 'Lidl')}: завтра ({fmt_date(d['start'])}) на скидке — стоит зайти в магазин"
-    return head + "\n\n" + describe(d, html=True)
+    text = head + "\n\n" + describe(d, html=True)
+    try:  # язык напоминаний — как у интерфейса бюджета («Настройки» → «Язык»)
+        from core.i18n import localize
+    except ImportError:  # lidl.py запущен отдельно, без бюджета — по-русски
+        return text
+    return localize(text)
 
 
 def deal_key(d: dict) -> str:

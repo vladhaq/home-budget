@@ -144,6 +144,8 @@ def reconcile(verbose=True):
     lidl.reparse()
     kaufland.reparse()
     biedronka.reparse()  # точные чеки Biedronka из сохранённых JSON
+    from receipts import photos
+    photos.reparse()  # фото чеков из сохранённого текста OCR — если разбор стал лучше
     mail_orders.parse_all(verbose=False)
     return match(verbose)
 
@@ -304,6 +306,10 @@ def match(verbose=True):
         used_p.add(p["id"])
         used_t.add(t["id"])
         con.execute("UPDATE purchases SET bank_tx_id = ? WHERE id = ?", (t["id"], p["id"]))
+        if not p["merchant"] and t["merchant"]:
+            # магазин не прочитался с фото чека (название искажено распознаванием) — берём из операции, с которой
+            # сошлась покупка: по нему работают твои правила магазина
+            con.execute("UPDATE purchases SET merchant = ? WHERE id = ? AND merchant IS NULL", (t["merchant"], p["id"]))
         if "по курсу" in (p["note"] or "") and abs(-t["amount"] - p["total"]) >= 0.01:
             # валютная покупка: фактическая сумма — из банка
             scale(p["id"], -t["amount"])
@@ -391,19 +397,23 @@ def match(verbose=True):
                      AND (source = 'email' OR coalesce(payment_method, '') = '')""")
 
     # «под вопросом»: регистрация платежа (Przelewy24/PayU) без подтверждения, которой нет в выписке, хотя выписка
-    # этот день уже покрывает (+5 дней на проводку), или повтор той же суммы тому же магазину в пределах 10 минут.
+    # этот день уже покрывает (+5 дней на проводку), или повтор той же суммы тому же магазину в пределах 10 минут
+    # с тем же описанием (два разных курса по 450 zł за полторы минуты — два платежа, а не повтор).
     # Неоплаченную регистрацию платёжная система отменяет сама. В суммы не идёт, пока ты не подтвердишь
     # («оплачено» — другой картой) или не удалишь.
     confirmed = {r["id"] for r in con.execute("SELECT id FROM confirmed_purchases")}
     first_day = day(txs[0]["date"]) if txs else None
     last_day = day(max(t["date"] for t in txs)) if txs else None
     regs = [p for p in purchases if "без подтверждения" in (p["note"] or "")]
+    what = {p["id"]: sorted(fold(r["name"] or "") for r in con.execute("SELECT name FROM items WHERE purchase_id = ?", (p["id"],)))
+            for p in regs}
     doubts = []
     for p in regs:
         if p["id"] in used_p or p["id"] in confirmed:
             continue
         covered = bool(txs) and first_day <= day(p["date"]) <= last_day - dt.timedelta(days=5)
         twin = any(q is not p and q["merchant"] == p["merchant"] and abs(q["total"] - p["total"]) < 0.005
+                   and what[q["id"]] == what[p["id"]]
                    and 0 < (dt.datetime.fromisoformat(p["date"]) - dt.datetime.fromisoformat(q["date"])).total_seconds() <= 600
                    for q in regs)
         if covered or twin:

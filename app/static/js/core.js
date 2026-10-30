@@ -1,8 +1,10 @@
 // Состояние, оформление, фильтры, выбор категории. Файлы — обычные скрипты с общей областью видимости,
 // подключаются по порядку (core → overview → pages → deals → settings → main); main.js запускает load().
-const MONTHS = ["январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"];
+const MONTHS = LANG === "en"
+  ? ["January","February","March","April","May","June","July","August","September","October","November","December"]
+  : ["январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"];
 const SOURCES = {lidl: "Lidl Plus", kaufland: "Kaufland", biedronka: "Biedronka", photo: "фото чека", email: "почта", bank: "банк (без чека)"};
-const zl = x => (x ?? 0).toLocaleString("ru-RU", {minimumFractionDigits: 2, maximumFractionDigits: 2}) + " zł";
+const zl = x => (x ?? 0).toLocaleString(LOC, {minimumFractionDigits: 2, maximumFractionDigits: 2}) + " zł";
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const monthName = m => MONTHS[+m.slice(5) - 1] + " " + m.slice(0, 4);
 const net = it => (it.amount || 0) - (it.discount || 0);
@@ -78,7 +80,7 @@ const fade = (ch, color, top, bottom) => {  // вертикальный град
   g.addColorStop(0, alpha(color, top)); g.addColorStop(1, alpha(color, bottom));
   return g;
 };
-const shortZl = v => Math.abs(v) >= 1000 ? `${(v / 1000).toLocaleString("ru-RU", {maximumFractionDigits: 1})} тыс.` : v;
+const shortZl = v => Math.abs(v) >= 1000 ? `${(v / 1000).toLocaleString(LOC, {maximumFractionDigits: 1})} ${t("тыс.")}` : v;
 // легенда — сплошным цветом ряда (solid): цвет столбцов — функция, у невыбранного периода он приглушён
 const solidLegend = {generateLabels: ch => Chart.defaults.plugins.legend.labels.generateLabels(ch).map(l => {
   const c = ch.data.datasets[l.datasetIndex].solid;
@@ -132,10 +134,11 @@ function animateEnter(el) {  // появление содержимого сни
   for (const b of el.querySelectorAll(".card b")) countUp(b);
 }
 function countUp(el) {
-  const m = el.textContent.match(/^(-?)([\d\u00a0\u202f ]+)(?:,(\d+))?(\s*(?:zł|%))?$/);
+  const m = LANG === "en" ? el.textContent.match(/^(-?)([\d,]+)(?:\.(\d+))?(\s*(?:zł|%))?$/)
+    : el.textContent.match(/^(-?)([\d\u00a0\u202f ]+)(?:,(\d+))?(\s*(?:zł|%))?$/);
   if (!m) return;
   const dec = m[3] ? m[3].length : 0, target = parseFloat(m[1] + m[2].replace(/\D/g, "") + (dec ? "." + m[3] : ""));
-  const fmt = v => v.toLocaleString("ru-RU", {minimumFractionDigits: dec, maximumFractionDigits: dec}) + (m[4] || "");
+  const fmt = v => v.toLocaleString(LOC, {minimumFractionDigits: dec, maximumFractionDigits: dec}) + (m[4] || "");
   const t0 = performance.now();
   const step = now => { const k = Math.min(1, (now - t0) / 700); el.textContent = fmt(target * (1 - Math.pow(1 - k, 3)));
                         if (k < 1) requestAnimationFrame(step); };
@@ -384,3 +387,25 @@ async function saveAll() {
   PENDING.clear(); updateSavebar(); BANK = null;
   const y = scrollY; await load(); scrollTo(0, y);
 }
+
+// Сворачиваемые разделы страниц («Настройки», «Банк»): заголовок с кратким статусом; что открыто — запоминается
+// в браузере. Умолчания — SECT_DEFAULT (страница дописывает свои), без умолчания раздел открыт.
+const SECT_DEFAULT = {};
+let SECT = (() => {
+  try { return JSON.parse(localStorage.getItem("budget-sections-open") || localStorage.getItem("budget-settings-open") || "{}"); }
+  catch (e) { return {}; }
+})();
+const sectOpen = id => SECT[id] ?? SECT_DEFAULT[id] ?? true;
+const sectHead = (title, note) => `<summary><h2>${title}</h2>${note ? `<span class="sectnote">${note}</span>` : ""}</summary>`;
+const section = (id, title, note, body) => `<details class="sect" data-sect="${id}" ${sectOpen(id) ? "open" : ""}>
+  ${sectHead(title, note)}<div class="sectbody">${body}</div></details>`;
+function openSect(id) {  // раздел понадобился (клик по сумме в таблице) — раскрыть; toggle запомнит
+  const d = document.querySelector(`details[data-sect="${id}"]`);
+  if (d && !d.open) d.open = true;
+}
+document.addEventListener("toggle", e => {  // toggle не всплывает — ловим на погружении
+  const id = e.target.dataset && e.target.dataset.sect;
+  if (!id) return;
+  SECT[id] = e.target.open;
+  try { localStorage.setItem("budget-sections-open", JSON.stringify(SECT)); } catch (err) { /* без хранилища — до перезагрузки */ }
+}, true);

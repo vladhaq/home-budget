@@ -14,7 +14,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from core import categories, update
 from core.common import BUDGET, DATA, fold
-from core.db import PAYMENT_METHODS, connect, get_meta
+from core.db import PAYMENT_METHODS, connect, get_meta, set_meta
 
 HOST, PORT = "127.0.0.1", 8765  # только локально, наружу не открываем
 app = Flask(__name__, static_folder=None)
@@ -51,7 +51,25 @@ def extension_cors(response):
 
 @app.get("/")
 def index():
-    return send_from_directory(STATIC, "index.html", max_age=0)
+    """Страница — с выбранным языком (data-lang): перевод готов с первой отрисовки. Не выбран — решит браузер."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    lang = get_meta(connect(), "lang")
+    if lang in ("ru", "en"):
+        html = html.replace('<html lang="ru">', f'<html lang="{lang}" data-lang="{lang}">', 1)
+    return app.response_class(html, mimetype="text/html", headers={"Cache-Control": "no-cache"})
+
+
+@app.post("/api/lang")
+def set_lang():
+    """Язык интерфейса (ru/en) — и для напоминаний в Telegram. auto — выбран по языку браузера, пока ты не выбрал сам."""
+    b = request.get_json()
+    if b.get("lang") not in ("ru", "en"):
+        return jsonify(ok=False, error="ru или en"), 400
+    con = connect()
+    if not (b.get("auto") and get_meta(con, "lang")):
+        set_meta(con, "lang", b["lang"])
+        con.commit()
+    return jsonify(ok=True)
 
 
 @app.get("/static/<path:rel>")
@@ -149,7 +167,7 @@ def bank():
         income[m][path] = round(income[m][path] + r["amount"], 2)
     months = {}
     for r in con.execute("""SELECT substr(p.date, 1, 7) m, p.source, p.payment_method pay, p.bank_tx_id bt,
-                                   sum(i.amount - coalesce(i.discount, 0)) v, i.category_id cid
+                                   sum(coalesce(i.amount, 0) - coalesce(i.discount, 0)) v, i.category_id cid
                             FROM purchases p JOIN items i ON i.purchase_id = p.id
                             WHERE coalesce(p.status, '') != 'doubt' GROUP BY p.id, i.line"""):
         if kinds.get(r["cid"]) in ("transfer", "income"):
@@ -826,9 +844,42 @@ def upgrade_install():
     return jsonify(ok=True)
 
 
+CODE_DIRS = ("app", "core", "receipts", "bank", "lidl-deals")
+
+
+def code_snapshot() -> dict:
+    files = [BUDGET / "budget.py"] + [p for d in CODE_DIRS for p in (BUDGET / d).rglob("*.py")]
+    return {str(p): p.stat().st_mtime for p in files if p.exists()}
+
+
+def watch_code(every: float = 3.0):
+    """Код программы поменялся (исправление, git pull) — сервер выходит с кодом RESTART, «сторож» запускает его
+    заново. Иначе он работает со старым кодом: правка категории в интерфейсе размечала всё старым словарём и снимала
+    новые правила. Ждёт, пока файлы перестанут меняться, и не мешает установке новой версии или входу."""
+    def loop():
+        base = code_snapshot()
+        while True:
+            time.sleep(every)
+            try:
+                now = code_snapshot()
+            except OSError:
+                continue  # файл как раз переписывают
+            if now == base or UPGRADE.get("state") in ("running", "restarting") or login_running():
+                continue
+            time.sleep(every)
+            try:
+                if code_snapshot() != now:
+                    continue  # ещё пишутся — проверим в следующий раз
+            except OSError:
+                continue
+            print("\nКод программы изменился — перезапускаю сервер…", flush=True)
+            os._exit(upgrade.RESTART)
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def serve(open_browser=True):
-    """Сервер — дочерним процессом «сторожа»: после установки новой версии он выходит с кодом upgrade.RESTART
-    и запускается заново уже с новыми файлами. Ctrl+C останавливает оба."""
+    """Сервер — дочерним процессом «сторожа»: после установки новой версии или изменения кода он выходит с кодом
+    upgrade.RESTART и запускается заново уже с новыми файлами. Ctrl+C останавливает оба."""
     if not SUPERVISED:
         args = [sys.executable, str(BUDGET / "budget.py"), "serve"] + ([] if open_browser else ["--no-browser"])
         env = {**os.environ, "BUDGET_SUPERVISED": "1"}
@@ -839,10 +890,11 @@ def serve(open_browser=True):
                 return
             if rc != upgrade.RESTART:
                 sys.exit(rc)
-            print("\nНовая версия установлена — перезапускаю сервер…", flush=True)
+            print("Сервер запускается заново…", flush=True)
             args = [a for a in args if a != "--no-browser"] + ["--no-browser"]  # браузер уже открыт
             time.sleep(0.5)
     categories.seed(connect())  # схема базы и дерево категорий — до первого запроса
+    watch_code()
     url = f"http://{HOST}:{PORT}"
     print(f"Бюджет {VERSION}: {url}  (Ctrl+C — остановить)", flush=True)
     if open_browser:

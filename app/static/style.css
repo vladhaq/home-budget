@@ -336,6 +336,8 @@ tr:hover .mini, summary:hover .mini, .mini:focus-visible { opacity: 1; }
 .dcenter .dname i { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--c); box-shadow: 0 0 8px var(--c); }
 .dleg b { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .dleg em { font-style: normal; color: var(--text-2); text-align: right; font-variant-numeric: tabular-nums; }
+.dleg.minus i { background: none; box-shadow: none; border: 2px dashed var(--text-2); }  /* вычтено: без доли в кольце */
+.dleg.minus b { color: var(--c-green); } .dleg.minus em { font-size: 12px; }
 .ovbar .tabs { margin: 0; }
 .crumbs { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 14px; color: var(--text-2); }
 .crumbs b { color: var(--text); }

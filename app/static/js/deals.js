@@ -6,7 +6,7 @@ let DCMP = null;
 S.dealStore = (() => { try { return localStorage.getItem("budget-deal-store") || "lidl"; } catch (e) { return "lidl"; } })();
 const sq = () => "store=" + S.dealStore;
 const ddmm = d => d ? `${d.slice(8, 10)}.${d.slice(5, 7)}` : "";
-const pct = v => `<span class="${v > 0 ? "up" : v < 0 ? "save" : "muted"}">${v > 0 ? "+" : ""}${v.toLocaleString("ru-RU")}%</span>`;
+const pct = v => `<span class="${v > 0 ? "up" : v < 0 ? "save" : "muted"}">${v > 0 ? "+" : ""}${v.toLocaleString(LOC)}%</span>`;
 // слова названия: «PrimoSkyrNaturalny150g» -> primo skyr naturalny 150g (как в словаре категорий)
 const nameWords = s => foldTxt(String(s).replace(/([a-ząćęłńóśźż])([A-ZĄĆĘŁŃÓŚŹŻ])/g, "$1 $2")
   .replace(/([A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż])(\d)/g, "$1 $2").replace(/(\d)([A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]{2})/g, "$1 $2"))

@@ -15,7 +15,7 @@ from core.common import fold, num
 
 AMOUNT = r"-?\d{1,5}[.,]\d{2}"
 # в конце строки товара: сумма и налоговая буква (A-D); OCR часто читает «A» как «4» или «Ą»
-LINE_END_RE = re.compile(rf"({AMOUNT})\s*([A-DĄ4]|\d)?\s*[.,]?\s*$")
+LINE_END_RE = re.compile(rf"({AMOUNT})\s*([A-DĄ4a-dą]|\d)?\s*[.,]?\s*$")  # «39.00a» — буква налога строчной у EasyOCR
 QTY_RE = re.compile(r"(\d+(?:[.,]\d{1,3})?)\s*(?:szt\.?|kg|op\.?)?\s*[x×*]\s*(\d+(?:[.,]\d{1,2})?)(?!\d)", re.I)
 # Kaufland: «2SZT x7,99» — OCR читает «SZT» как «5ZT», «52T», «527», «S2ZT»; «ISZT» — это «1SZT»
 SZT_RE = re.compile(r"(?<![\w,.])(?:[iIl|]?(\d{1,3}?)|[Il])\s?[S5]\s?[Z2]?\s?[Z2]\s?[T7\]]\]?(?=\s*[x×*])")
@@ -43,11 +43,14 @@ LEGAL_NAMES = {"jeronimo martins": "Biedronka", "zabka polska": "Żabka", "actio
 
 
 def parse_text(text: str) -> dict:
-    # EasyOCR: «15 ,98C» -> «15,98C» (пробел перед запятой), «4,Oo» -> «4,00» (буква O вместо нуля после запятой)
-    lines = [re.sub(r"(\d) ([.,]\d{2})(?!\d)", r"\1\2", re.sub(r"\s+", " ", ln)).strip(" |") for ln in text.splitlines()]
+    # EasyOCR: «15 ,98C» / «39 . 00» -> «15,98C» / «39.00» (пробелы у запятой), «4,Oo» -> «4,00» (буква O вместо нуля)
+    lines = [re.sub(r"(\d)(?: ([.,]) ?| ?([.,]) )(\d{2})(?!\d)", r"\1\2\3\4", re.sub(r"\s+", " ", ln)).strip(" |")
+             for ln in text.splitlines()]
     lines = [re.sub(r"(?<=\d[.,]\d)[Oo]", "0", re.sub(r"(?<=\d[.,])[Oo]", "0", ln)) for ln in lines]
     lines = [ln for ln in lines if ln]
     items, totals, dates, payments, pending = [], [], [], [], None
+    payable = []  # «DO ZAPŁATY» — сколько списано: «SUMA PLN 48,45», а с возвратом залога за тару к оплате 41,95
+    orphans = []  # название без строки цены: в этом варианте цену не прочитали, в другом — название искажено
     pending_discount = False
     # товары — между «PARAGON FISKALNY» (если распознан) и «Sprzedaż opodatkowana»/«SUMA»
     start = next((n for n, ln in enumerate(lines) if "paragon" in fold(ln) and "fiskal" in fold(ln)), -1)
@@ -63,6 +66,8 @@ def parse_text(text: str) -> dict:
             dates.append(_date(m, ln))
         if m := TOTAL_RE.match(low.replace(" ", " ")):
             totals.append(num(re.sub(r"\s", ".", m.group(3))))
+            if m.group(1).startswith("do"):
+                payable.append(totals[-1])
             pending_discount = False
             continue
         if re.fullmatch(r"rabat\s*:?", low):
@@ -95,11 +100,15 @@ def parse_text(text: str) -> dict:
         item = parse_item_line(ln, pending)
         if item:
             items.append(item)
+            if pending and orphans and orphans[-1] == pending and fold(item["name"])[:6] == fold(pending)[:6]:
+                orphans.pop()  # цена пришла следующей строкой — название не бесхозное
             pending = None
         elif re.search(r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]{3}", ln) and not re.search(r"\d[.,]\d{2}", ln):
             pending = ln  # название на одной строке, «1 x 3,99 3,99A» — на следующей
-    return {"items": items, "totals": [t for t in totals if t], "dates": [d for d in dates if d],
-            "payments": payments, "merchant": detect_merchant(text), "store": detect_store(lines)}
+            orphans.append(ln)
+    return {"items": items, "totals": [t for t in totals if t], "payable": [t for t in payable if t],
+            "dates": [d for d in dates if d],
+            "payments": payments, "merchant": detect_merchant(text), "store": detect_store(lines), "orphans": orphans}
 
 
 def parse_item_line(ln: str, pending: str | None = None) -> dict | None:
@@ -204,13 +213,17 @@ def _keyed(items: list[dict], known: list[str] | None = None, names: dict | None
 
 def merge(runs: list[dict], hint_date: str | None = None) -> dict:
     """Собрать один чек из нескольких разборов. status: ok / derived (одна сумма вычислена из итога) / check."""
-    totals = Counter(t for r in runs for t in r["totals"])
+    totals = Counter(t for r in runs for t in r.get("payable", ())) or Counter(t for r in runs for t in r["totals"])
     total = totals.most_common(1)[0][0] if totals else None
 
     # основа — разбор, с которым больше всего согласны остальные (те же позиции в других вариантах OCR),
     # а не просто самый длинный: в длинном бывают искажённое название или мусорная строка
+    # Сначала — разборы, у которых сумма позиций сходится с итогом: мусорная строка («19080 ane 33.004» из
+    # «1 szt*39.00 39.00A») в двух одинаковых вариантах Tesseract не перевешивает верный разбор EasyOCR
     seen_keys = [set(_keyed(r["items"])) for r in runs]
-    base = max(runs, key=lambda r: (sum(sum(1 for s in seen_keys if k in s) for k in _keyed(r["items"])),
+    fits = lambda r: total is not None and bool(r["items"]) and all(i["amount"] is not None for i in r["items"]) \
+        and abs(sum(i["amount"] - (i["discount"] or 0) for i in r["items"]) - total) < 0.015  # noqa: E731
+    base = max(runs, key=lambda r: (fits(r), sum(sum(1 for s in seen_keys if k in s) for k in _keyed(r["items"])),
                                     len(r["items"]), sum(1 for i in r["items"] if i["product_code"])))
     keys = _keyed(base["items"])
     first = {}
@@ -235,6 +248,8 @@ def merge(runs: list[dict], hint_date: str | None = None) -> dict:
     for k, base_it in zip(keys, base["items"]):
         its = info[k] or [base_it]
         names = [i["name"] for i in its]
+        # то же название из вариантов, где цену не прочитали (EasyOCR путает W/M с H: «HIETOHA» — это «MIETOWA»)
+        names += [o for r in runs for o in r.get("orphans", ()) if SequenceMatcher(None, fold(o), fold(base_it["name"])).ratio() >= 0.6]
         # «медоида»: вариант, в среднем самый похожий на остальные — случайные искажения OCR гасятся
         name = max(set(names), key=lambda a: sum(SequenceMatcher(None, a, b).ratio() for b in names))
         code = Counter(i["product_code"] for i in its if i["product_code"]).most_common(1)
