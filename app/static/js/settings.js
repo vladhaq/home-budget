@@ -20,7 +20,7 @@ const loginBtn = (key, label) => loginRunning() && UPD.login.key === key
   ? `<span class="muted"><span class="spin"></span>жду вход в окне Chrome…</span>`
   : `<button class="chip" data-login="${key}" ${loginRunning() || updRunning() ? "disabled" : ""}
       title="откроется окно Chrome: логин, пароль и коды вводишь там, программа их не видит">${label}</button>`;
-const fmtDays = d => d < 1 ? `${Math.max(1, Math.round(d * 24))} ч` : `${d.toLocaleString("ru-RU", {maximumFractionDigits: d < 10 ? 1 : 0})} дн.`;
+const fmtDays = d => d < 1 ? `${Math.max(1, Math.round(d * 24))} ч` : `${d.toLocaleString(LOC, {maximumFractionDigits: d < 10 ? 1 : 0})} дн.`;
 // дата входа и срок жизни токена (Lidl, Kaufland, банк): средний — от входа до отказа сервиса
 function tokenInfo(s) {
   const t = s.token;
@@ -78,17 +78,7 @@ async function checkBiedronkaSession(net) {
   }
 }
 // разделы настроек сворачиваются; что открыто — запоминается (по умолчанию открыты обновление, магазины и источники)
-const SECT_DEFAULT = {update: true, stores: true, sources: true, schedule: false, program: false, hidden: false, journal: false};
-let SECT = (() => { try { return JSON.parse(localStorage.getItem("budget-settings-open") || "{}"); } catch (e) { return {}; } })();
-const sectOpen = id => SECT[id] ?? SECT_DEFAULT[id];
-const section = (id, title, note, body) => `<details class="sect" data-sect="${id}" ${sectOpen(id) ? "open" : ""}>
-  <summary><h2>${title}</h2>${note ? `<span class="sectnote">${note}</span>` : ""}</summary><div class="sectbody">${body}</div></details>`;
-document.addEventListener("toggle", e => {  // toggle не всплывает — ловим на погружении
-  const id = e.target.dataset && e.target.dataset.sect;
-  if (!id) return;
-  SECT[id] = e.target.open;
-  try { localStorage.setItem("budget-settings-open", JSON.stringify(SECT)); } catch (err) { /* без хранилища — до перезагрузки */ }
-}, true);
+Object.assign(SECT_DEFAULT, {update: true, stores: true, sources: true, schedule: false, lang: false, program: false, hidden: false, journal: false});
 
 // Biedronka: подключение сессии из Chrome через расширение «Budget Browser Connector»
 function biedronkaBox() {
@@ -137,8 +127,9 @@ function drawSettings() {
   const lastDone = UPD.runs.find(r => r.finished);
   const sch = SCHED || {};
   const schText = sch.loading ? `<span class="muted">проверяю Планировщик заданий…</span>`
-    : sch.installed ? `<b>включён</b>: каждый день в ${esc(sch.time || "?")}${sch.state === "Disabled" ? ` <span class="up">(задача отключена в Планировщике)</span>` : ""}.
-        Следующий запуск: ${dtf(sch.next_run)}. Последний: ${dtf(sch.last_run)}${sch.last_run && !sch.last_ok ? ` <span class="up">(код ошибки ${sch.last_result})</span>` : ""}`
+    : sch.installed ? `<b>включён</b>: каждый день в ${esc(sch.time || "?")}${sch.logon ? ", а если обновление прервалось (сбой Windows, выключение) — ещё раз при входе в Windows" : ""}${sch.state === "Disabled" ? ` <span class="up">(задача отключена в Планировщике)</span>` : ""}.
+        Следующий запуск: ${dtf(sch.next_run)}. Последний: ${dtf(sch.last_run)}${sch.last_run && !sch.last_ok ? ` <span class="up">(код ошибки ${sch.last_result})</span>` : ""}
+        ${sch.stale ? `<br><span class="warn">Задача создана старой версией${sch.logon ? "" : " (без повтора после сбоя"}${sch.limit && sch.limit !== "PT12H" ? `${sch.logon ? " (" : ", "}Windows снимает её через ${esc(sch.limit.replace("PT", "").replace("H", " ч"))}` : ""}${!sch.logon || (sch.limit && sch.limit !== "PT12H") ? ")" : ""} — нажми «Сохранить время», чтобы обновить.</span>` : ""}`
     : `<b>выключен</b>${sch.error ? ` <span class="up">(${esc(sch.error)})</span>` : ""}`;
   const srcBad = UPD.sources.filter(s => (s.last && s.last.status === "error") || s.warn).length;
   const srcWarn = UPD.sources.filter(s => s.last && (s.last.status === "warn" || s.last.status === "off")).length;
@@ -186,7 +177,8 @@ function drawSettings() {
         <button class="btn" data-sched="on">${sch.installed ? "Сохранить время" : "Включить"}</button>
         ${sch.installed ? `<button class="chip" data-sched="off">выключить</button>` : ""}</span></div>
     <p class="muted">Задача «BudgetUpdate» в Планировщике заданий Windows, работает без окна. Если в это время компьютер выключен или
-      спит — обновление запустится, как только он включится; пока оно идёт, Windows не усыпит компьютер.</p>`;
+      спит — обновление запустится, как только он включится; пока оно идёт, Windows не усыпит компьютер. Если оно
+      всё же прервалось (Windows упала во сне, компьютер выключили) — повторится при следующем входе в Windows.</p>`;
 
   const hiddenBody = `<table><tr><th>покупка</th><th>источник</th><th>удалена</th><th></th></tr>` + D.hidden.map(h => `<tr><td>${esc(h.label)}</td>
       <td>${esc(SOURCES[h.source] || h.source)}</td><td>${dtf(h.created)}</td>
@@ -207,6 +199,10 @@ function drawSettings() {
     section("stores", "Магазины", onStores.length ? `учитываются: ${esc(onStores.join(", "))}` : "все выключены", storesBox()) +
     section("sources", "Источники", srcBad ? `<span class="up">с ошибкой: ${srcBad}</span>` : srcWarn ? `<span class="warn">с замечаниями: ${srcWarn}</span>` : "все в порядке", srcBody) +
     section("schedule", "Автозапуск", sch.loading ? "" : sch.installed ? `каждый день в ${esc(sch.time || "?")}` : "выключен", schedBody) +
+    section("lang", "Язык · Language", LANG === "en" ? "English" : "Русский", `<div class="updbox">
+      <span data-notr>Язык интерфейса и напоминаний в Telegram · Interface and Telegram reminders language</span>
+      <span data-notr><button class="chip ${LANG === "ru" ? "on" : ""}" data-setlang="ru">Русский</button>
+        <button class="chip ${LANG === "en" ? "on" : ""}" data-setlang="en">English</button></span></div>`) +
     section("program", "Программа", `версия ${esc((UPG && UPG.check && UPG.check.current) || UPD.version || "?")}`, upgradeBox()) +
     (D.hidden.length ? section("hidden", "Удалённые покупки", `${D.hidden.length}`, hiddenBody) : "") +
     section("journal", "Журнал обновлений", UPD.runs.length ? `запусков: ${UPD.runs.length}, последний ${dtf(UPD.runs[0].started)} ${stBadge(UPD.runs[0].finished ? UPD.runs[0].status : "running")}` : "", journalBody);
@@ -313,7 +309,7 @@ async function checkUpgrade() {
 }
 async function installUpgrade() {
   const l = UPG && UPG.check && UPG.check.latest;
-  if (!l || !confirm(`Установить версию ${l.version}?${UPG.check.auto_restart ? " Сервер перезапустится, страница обновится сама." : ""}`)) return;
+  if (!l || !confirm(t(`Установить версию ${l.version}?`) + (UPG.check.auto_restart ? " " + t("Сервер перезапустится, страница обновится сама.") : ""))) return;
   try { await post("/api/upgrade/install", {}); } catch (e) { toast("Не запустилось: " + e.message); return; }
   UPG = {state: "running", version: l.version, step: "начинаю…", check: UPG.check};
   drawSettings();

@@ -135,8 +135,9 @@ async function renderBank() {
       <div class="card">наличные<b>${zl(atm)}</b>снято; в чеках за наличные ${zl(cash)}</div>
       <div class="card">доступ к банку<b>${BANK.valid_until ? BANK.valid_until.slice(0, 10) : "—"}</b>продлить: «Настройки» → «обновить токен»</div>
     </div>
-    <h2>Баланс</h2><div class="chartbox"><canvas id="bal" height="90"></canvas></div>
-    <h2>Доходы и расходы по месяцам</h2>
+    ${section("bank.balance", "Баланс", days.length ? `${ddmmyy(days[0])} — ${ddmmyy(days[days.length - 1])}` : "",
+      `<div class="chartbox"><canvas id="bal" height="90"></canvas></div>`)}
+    ${section("bank.flow", "Доходы и расходы по месяцам", `месяцев: ${months.length}`, `
     <p class="muted">Легенда включает и выключает виды. Клик по столбцу графика или по сумме в таблице — ниже откроются
       операции, из которых она сложилась.</p>
     <div class="chartbox"><canvas id="flow" height="110"></canvas></div>
@@ -148,11 +149,12 @@ async function renderBank() {
       ${cellBtn(m, "receipts", mm(m).receipts)}${cellBtn(m, "bank_only", mm(m).bank_only)}${cellBtn(m, "other", mm(m).other)}
       ${cellBtn(m, "cash", mm(m).cash)}${cellBtn(m, "atm", mm(m).atm)}
       ${cellBtn(m, "net", inc(m) - pko(m), inc(m) - pko(m) >= 0 ? "save" : "up")}</tr>`).join("") +
-    `</table></div>
-    <section id="banklist"></section>
-    <h2>Поступления по видам</h2><table><tr><th>вид</th><th class="n">сумма</th></tr>` +
-    Object.entries(incCats).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(k)}${k.startsWith("Переводы") ? ' <span class="src">не доход</span>' : ""}</td>
-      <td class="n">${zl(v)}</td></tr>`).join("") + `</table>
+    `</table></div>`)}
+    <details class="sect" data-sect="bank.ops" id="banklist" ${sectOpen("bank.ops") ? "open" : ""}></details>
+    ${section("bank.income", "Поступления по видам", `видов: ${Object.keys(incCats).length}`,
+      `<table><tr><th>вид</th><th class="n">сумма</th></tr>` +
+      Object.entries(incCats).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(k)}${k.startsWith("Переводы") ? ' <span class="src">не доход</span>' : ""}</td>
+        <td class="n">${zl(v)}</td></tr>`).join("") + `</table>`)}
     <p class="muted">Расходы — без переводов людям и снятия наличных. «Только выписка» — операции без чека: их можно
       разметить на странице «Неопознанные» или в обзоре (источник «банк»).</p>`;
   bankCharts.push(new Chart(document.getElementById("bal"), {type: "line",
@@ -160,7 +162,7 @@ async function renderBank() {
                                                 {cubicInterpolationMode: "monotone"})]},
     plugins: [GLOW],
     options: {animation: chartAnim(), interaction: {mode: "index", intersect: false}, plugins: {legend: {display: false},
-        tooltip: {callbacks: {label: x => ` остаток: ${zl(x.parsed.y)}`}}},
+        tooltip: {callbacks: {label: x => ` ${t("остаток")}: ${zl(x.parsed.y)}`}}},
       scales: {x: softX({ticks: {maxTicksLimit: 14, maxRotation: 0}}), y: softY({beginAtZero: true})}}}));
   // столбцы по месяцам: градиент и свечение; выбранный месяц ярче, остальные приглушены
   const bon = i => !S.bankMonth || months[i] === S.bankMonth;
@@ -169,12 +171,12 @@ async function renderBank() {
     hoverBackgroundColor: x => fade(x.chart, c, 1, .65)}; };
   bankCharts.push(new Chart(document.getElementById("flow"), {type: "bar",
     data: {labels: months.map(m => m.slice(5) + "." + m.slice(2, 4)), datasets: [
-      {label: "доходы", data: months.map(inc), ...seg("--c-green"), stack: "in"},
-      {label: "по чекам", data: months.map(m => mm(m).receipts || 0), ...seg("--c-blue"), stack: "out"},
-      {label: "наличными (чеки)", data: months.map(m => mm(m).cash || 0), ...seg("--c-violet"), stack: "out"},
-      {label: "только выписка", data: months.map(m => mm(m).bank_only || 0), ...seg("--c-orange"), stack: "out"},
-      {label: "другой картой", data: months.map(m => mm(m).other || 0), ...seg("--c-gray"), stack: "out"},
-      {label: "переводы и банкомат", data: months.map(m => flows(m).transfers), ...seg("--c-gray2"), stack: "tr",
+      {label: t("доходы"), data: months.map(inc), ...seg("--c-green"), stack: "in"},
+      {label: t("по чекам"), data: months.map(m => mm(m).receipts || 0), ...seg("--c-blue"), stack: "out"},
+      {label: t("наличными (чеки)"), data: months.map(m => mm(m).cash || 0), ...seg("--c-violet"), stack: "out"},
+      {label: t("только выписка"), data: months.map(m => mm(m).bank_only || 0), ...seg("--c-orange"), stack: "out"},
+      {label: t("другой картой"), data: months.map(m => mm(m).other || 0), ...seg("--c-gray"), stack: "out"},
+      {label: t("переводы и банкомат"), data: months.map(m => flows(m).transfers), ...seg("--c-gray2"), stack: "tr",
        hidden: !S.bankShow.has("transfers")}]},
     plugins: [GLOW],
     options: {animation: chartAnim(), plugins: {tooltip: {callbacks: {label: x => ` ${x.dataset.label}: ${zl(x.parsed.y)}`}},
@@ -184,7 +186,7 @@ async function renderBank() {
         S.bankCell = null; drawBankList();
       }}}, scales: {x: softX({stacked: true}), y: softY({stacked: true})},
       onClick: (e, els) => { if (els.length) { const m = months[els[0].index];
-        S.bankMonth = S.bankMonth === m && !S.bankCell ? null : m; S.bankCell = null; drawBankList();
+        S.bankMonth = S.bankMonth === m && !S.bankCell ? null : m; S.bankCell = null; drawBankList(); openSect("bank.ops");
         document.getElementById("banklist").scrollIntoView({behavior: "smooth"}); } }}}));
   for (const [i, t] of BANK_TYPES.entries()) if (!S.bankShow.has(t.key) && i < 5) bankCharts[1].hide(i);
   drawBankList();
@@ -255,11 +257,14 @@ function drawBankList() {
   }
   const chip = k => { const t = BANK_TYPES.find(x => x.key === k);
     return `<span class="st" style="--c:var(${t.color})">${t.label}</span>`; };
-  box.innerHTML = `<div class="nav"><h2 style="margin:0">Операции: ${S.bankMonth ? monthName(S.bankMonth) : "весь период"}${cell
-        ? ` · ${cell.label}: <span class="${cell.net ? (total >= 0 ? "save" : "up") : ""}">${zl(total)}</span>` : ""}</h2>
+  // раздел-раскрывашка: в заголовке — месяц и сумма ячейки, кнопки — уже внутри (клик по ним не сворачивает)
+  box.innerHTML = sectHead(`Операции: ${S.bankMonth ? monthName(S.bankMonth) : "весь период"}${cell
+        ? ` · ${cell.label}: <span class="${cell.net ? (total >= 0 ? "save" : "up") : ""}">${zl(total)}</span>` : ""}`,
+      `операций: ${rows.length}`) + `<div class="sectbody">
+    ${cell || S.bankMonth ? `<div class="nav">
       ${cell ? `<button class="chip" data-bankcell-reset="1">все виды${S.bankMonth ? " за месяц" : ""}</button>` : ""}
       ${S.bankMonth ? `<button class="chip" data-bankall="1">весь период</button>
-        <button class="chip" data-month-open="${S.bankMonth}">открыть месяц в обзоре</button>` : ""}</div>
+        <button class="chip" data-month-open="${S.bankMonth}">открыть месяц в обзоре</button>` : ""}</div>` : ""}
     <p>${Object.entries(tot).map(([k, v]) => `${chip(k)} ${zl(v)}`).join(" &nbsp; ") || "нет операций"}
       ${cell && cell.net ? `<span class="muted"> — доходы минус расходы PKO</span>` : ""}</p>
     <table><tr><th>дата</th><th>вид</th><th>кто / магазин</th><th>что</th><th>категория</th><th class="n">сумма</th></tr>` +
@@ -281,7 +286,7 @@ function drawBankList() {
         <td style="white-space:nowrap">${one ? catPick(one.cat, "item", {name: one.name, pid: p.id, line: one.line}) + noteBtn(p.id, one)
           : `<button class="linkbtn" data-bopen="${esc(key)}">${r.items.length} поз. — раскрыть</button>`}</td>
         <td class="n">${zl(r.amount)}</td></tr>` + (open ? bankDetail(r, key) : "");
-    }).join("") + `</table>${rows.length > 800 ? `<p class="muted">Показаны первые 800 из ${rows.length} — выбери месяц в таблице или на графике.</p>` : ""}`;
+    }).join("") + `</table>${rows.length > 800 ? `<p class="muted">Показаны первые 800 из ${rows.length} — выбери месяц в таблице или на графике.</p>` : ""}</div>`;
 }
 
 // раскрытие операции: что за операция в выписке, откуда покупка, все позиции с категориями, что ещё было в эти дни
@@ -391,7 +396,7 @@ async function renderCash() {
       {stepped: true, pointRadius: ev.length <= 40 ? 3 : 0})]},  // остаток меняется событиями — ступеньками
     plugins: [GLOW],
     options: {animation: chartAnim(), interaction: {mode: "index", intersect: false}, plugins: {legend: {display: false},
-        tooltip: {callbacks: {label: x => ` наличные: ${zl(x.parsed.y)}`}}},
+        tooltip: {callbacks: {label: x => ` ${t("наличные")}: ${zl(x.parsed.y)}`}}},
       scales: {x: softX({ticks: {maxTicksLimit: 12, maxRotation: 0}}), y: softY({beginAtZero: true})}}});
 }
 async function walletSave() {

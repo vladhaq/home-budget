@@ -103,6 +103,9 @@ KEYWORDS = [
     ("vice.alcohol", r"\blomza"),
     ("vice.alcohol", r"\bpiw|piwo|\brum\b|likier|\bwino\b|wodka|whisk|\bgin\b|okocim|zywiec|tyskie|\blech\b|somersby"
                  r"|jager|warka|carlsberg|heineken|desperados|kozel|radler|cydr"),
+    # вейп и табак (и в твоём комментарии к операции банка: «Liquid Mango Ice 30ml 20mg»)
+    ("vice.tobacco", r"liquid|e-?papieros|\bvape|\btpd\b|\bsalt\b.*\bmg\b|nikotyn|oxva|vaporesso|voopoo|geekvape"
+                     r"|elf ?bar|lost ?mary|klarro|papieros|tyto[nń]|\biqos|\bterea\b|\bheets\b|\bsnus"),
     ("goods.electronics", r"\betui\b|szklo (na|ochron|hartow)|szklo ochronne|folia ochron|ochrona na ekran|ladowark|supervooc"
                     r"|power ?bank|smart ?band|smart plug|inteligentn\w* gniazd|czujnik temperatur|uchwyt (do|na) (monitor|telefon)"
                     r"|uchwyt stolowy do monitor|adapter vesa|sluchawk|kabel|przewod usb"
@@ -162,6 +165,18 @@ KEYWORDS = [
                   r"|burak|seler|por\b"),
     ("food.produce", r"banan|jablk|mandaryn|winogr|\bkiwi|\bkaki|cytryn|mango|grusz|pomarancz|truskaw|malin|borowk"
                    r"|arbuz|brzoskw|sliwk|awokado|granat"),
+    # Сокращения Biedronka: названия на чеке урезаны и слитны («KolCiasBonitki700g», «ZelUdrozRurKret1kg»,
+    # «Mi mie wp wot 400g»). В конце списка — срабатывают, только если полные слова выше ничего не нашли
+    ("food.meat", r"\bmi\.? mie\b"),  # mięso mielone
+    ("food.sausage", r"\bpar berl|berlink"),  # parówki Berlinki
+    ("food.sweets", r"\bcias\b|bonitk|ciacho|\bcz\b|milka|dessell|\bdes orz"),  # ciastka, czekolada, deser
+    ("food.dairy", r"\bmlek\b"),  # mleko
+    ("food.bread", r"\bchl\b"),  # chleb
+    ("food.grains", r"\bmak fal"),  # makaron falbanki
+    ("food.grocery", r"kukur|fasol"),  # kukurydza, fasola (консервы)
+    ("health.hygiene", r"elmex|aquar"),  # pasta do zębów («Aquafresh» — OCR «Aquarre»)
+    ("home.furniture", r"\bpodg\b"),  # podgrzewacze (свечи)
+    ("home.chem", r"udroz|\bwor\b|wi[ag]zan|\breka ?lat|\bzos(ia)? sam|\bpapier\b"),  # żel udrażniający, worki, rękawice
 ]
 _COMPILED = [(key, re.compile(rx)) for key, rx in KEYWORDS]
 
@@ -370,7 +385,7 @@ NOTE_KEYWORDS = [
     ("health.doctors", r"врач|доктор|стоматолог|зубн(ой|ого) врач|анализ|клиник|прием у|осмотр|узи|рентген"),
     ("health.hygiene", r"шампун|гель для душа|крем|зубн(ая|ую) паст|щетк|мыло|дезодорант|косметик|бритв|"
                        r"прокладк|салфетк|парикмахер|стрижк|маникюр"),
-    ("vice.tobacco", r"сигарет|табак|вейп|\bvape\b|жидкост[ьи] для|стики|iqos|снюс"),
+    ("vice.tobacco", r"сигарет|табак|вейп|\bvape\b|жидкост[ьи] для|жиж|картридж|испарител|стики|iqos|снюс"),
     ("vice.alcohol", r"пиво|вино|водк|виск|коньяк|алкогол|сидр|шампанск"),
     ("goods.clothes", r"одежд|обув|куртк|кроссовк|ботинк|футболк|джинс|штаны|брюк|носк|рубашк|свитер|худи|шапк"),
     ("comms.mobile", r"пополнени|связь|мобильн|интернет|симк"),
@@ -398,13 +413,66 @@ NOTE_KEYWORDS = [
     ("food.drinks", r"вода\b|сок\b|напит|энергетик|кола"),
     ("food", r"продукт|еда|рынок|магазин у дома|бакале"),
 ]
+# Комментарии по-английски (интерфейс на английском — проверяются первыми)
+NOTE_KEYWORDS_EN = [
+    ("food.coffee", r"coffee beans|ground coffee|instant coffee|\btea\b"),
+    ("leisure.cafe", r"\bcafe|coffee|cappuccino|latte|restaurant|lunch|dinner|breakfast|burger|pizza|kebab|sushi|mcdonald"
+                     r"|\bkfc\b|food delivery|takeaway|\bbar\b|\bpub\b|canteen|fast ?food|glovo|wolt|pyszne"),
+    ("transport.taxi", r"\btaxi|\bcab\b|\buber\b|\bbolt\b|free ?now"),
+    ("transport.intercity", r"\btrain|intercity|coach ticket|bus ticket to|koleo|\bpkp\b|flixbus"),
+    ("transport.city", r"\bbus\b|\btram|public transport|metro|subway|bus pass|jakdojade|\bmpk\b|e-?scooter"),
+    ("transport.fuel", r"petrol|gasoline|\bfuel|diesel|gas station"),
+    ("transport.bike", r"bicycle|\bbike|brake pads"),
+    ("health.pharmacy", r"pharmacy|medicine|\bpills?\b|tablets|syrup|drops|plaster|bandage|painkiller|ibuprofen|paracetamol"
+                        r"|prescription"),
+    ("health.vitamins", r"vitamin|supplement|magnesium|omega|protein powder"),
+    ("health.doctors", r"doctor|dentist|\btests?\b|blood test|clinic|check-?up|ultrasound|x-?ray"),
+    ("health.hygiene", r"shampoo|shower gel|\bcream|toothpaste|toothbrush|\bsoap|deodorant|cosmetic|razor|\bpads\b"
+                       r"|wipes|hairdresser|haircut|manicure"),
+    ("vice.tobacco", r"cigarett|tobacco|\bvape|e-?liquid|\bjuice for|cartridge|\bcoil|heets|iqos|snus"),
+    ("vice.alcohol", r"\bbeer|\bwine|vodka|whisk|cognac|alcohol|cider|champagne"),
+    ("goods.clothes", r"clothes|clothing|shoes|jacket|sneakers|boots|t-?shirt|jeans|trousers|pants|socks|shirt|sweater"
+                      r"|hoodie|\bhat\b|\bcap\b"),
+    ("comms.mobile", r"top-?up|mobile|\bsim\b|phone plan|internet"),
+    ("goods.electronics", r"headphones|earbuds|charger|cable|laptop|smartphone|\bphone\b|tablet|\bmouse|keyboard"
+                          r"|usb stick|flash drive|batter(y|ies)"),
+    ("comms.subscriptions", r"subscription|netflix|spotify|youtube|chatgpt|claude|icloud|google one"),
+    ("leisure.fun", r"cinema|movie|concert|theat|museum|exhibition|bowling|billiard|\bgame|steam|escape room|water park"),
+    ("leisure.gifts", r"\bgift|present|flowers|bouquet|postcard|donation|charity|\bhelp"),
+    ("goods.appliances", r"vacuum|fridge|washing machine|dishwasher|microwave|kettle|\biron\b|hair ?dryer|blender|appliance"),
+    ("home.chem", r"household|detergent|washing powder|cleaning|sponge|trash bags|bin bags|toilet paper|paper towel"),
+    ("home.furniture", r"furniture|\btable\b|chair|shelf|\blamp|curtain|pillow|blanket|bedding|dishes|\bpot\b|\bpan\b"
+                       r"|plates|\bmug|\bcup\b"),
+    ("home.repair", r"\btools?\b|screwdriver|\bdrill|hammer|screws|nails|repair|\bpaint|wallpaper"),
+    ("education", r"tuition|\bcourse|universit|college|\bexam|textbook|notebook|stationery"),
+    ("housing.rent", r"\brent\b|for the flat|for the room|for the apartment"),
+    ("housing.utilities", r"utilities|electricity|\bgas bill|water bill"),
+    ("finance.taxes", r"\btax|\bduty\b|\bfine\b|\bfee for"),
+    ("other.delivery", r"courier|parcel|\bpost\b|inpost|parcel locker|shipping"),
+    ("food.snacks", r"vending|snack|\bchips|crisps|\bnuts"),
+    ("food.sweets", r"chocolate|cand(y|ies)|cookies|biscuits|ice cream|\bcake|dessert|sweets"),
+    ("food.pastry", r"donut|doughnut|croissant|pastr|\bbun\b|\bbuns\b"),
+    ("food.bread", r"bread|baguette|lavash|tortilla"),
+    ("food.produce", r"\bfruit|apple|banana|orange|berr(y|ies)"),
+    ("food.produce", r"vegetable|potato|tomato|cucumber|onion"),
+    ("food.meat", r"\bmeat|chicken|\bbeef|\bpork|mince|\bfish|salmon|herring"),
+    ("food.dairy", r"\bmilk|kefir|yog(h)?urt|cottage cheese|sour cream|\beggs?\b"),
+    ("food.grains", r"\bpasta\b(?! do\b)|\brice\b|buckwheat|oats|cereal|flour"),  # «pasta do zębów» — польское
+    ("food.drinks", r"\bwater\b|\bjuice\b|\bdrinks?\b|energy drink|\bcola\b|soda"),
+    ("food", r"groceries|\bfood\b|market|corner shop"),
+]
 _NOTE_COMPILED = [(key, re.compile(fold(rx))) for key, rx in NOTE_KEYWORDS]
+_NOTE_COMPILED_EN = [(key, re.compile(fold(rx))) for key, rx in NOTE_KEYWORDS_EN]
 
 
-def note_category(note: str) -> str | None:
-    """Ключ категории по твоему комментарию к позиции: сначала русские слова, потом польский словарь товаров."""
+def note_category(note: str, lang: str = "ru") -> str | None:
+    """Ключ категории по твоему комментарию к позиции: сначала словарь языка интерфейса, потом польский словарь
+    товаров (в комментарии пишут и «kawa», «ser»), потом словарь другого языка; нигде нет — None. Порядок важен
+    для латиницы: «pasta» по-английски — макароны, а в польском словаре «pasta do zębów» — зубная паста."""
     f = fold(note or "")
-    return next((key for key, rx in _NOTE_COMPILED if rx.search(f)), None) or keyword_category(note or "")
+    own, other = (_NOTE_COMPILED_EN, _NOTE_COMPILED) if lang == "en" else (_NOTE_COMPILED, _NOTE_COMPILED_EN)
+    return (next((key for key, rx in own if rx.search(f)), None) or keyword_category(note or "")
+            or next((key for key, rx in other if rx.search(f)), None))
 
 
 def keyword_category(name: str) -> str | None:
@@ -493,6 +561,8 @@ def categorize(con) -> dict:
     """Назначить категории всем позициям, кроме размеченных вручную. Возвращает статистику."""
     seed(con)
     K = key_ids(con)
+    from core.db import get_meta
+    lang = get_meta(con, "lang") or "ru"  # комментарии — сначала по словарю языка интерфейса
     by_code = {r["product_code"]: r["category_id"] for r in con.execute(
         "SELECT product_code, category_id FROM rules WHERE target = 'item' AND product_code IS NOT NULL ORDER BY id")}
     patterns = [(re.compile(r["pattern"]), r["category_id"]) for r in con.execute(
@@ -510,7 +580,7 @@ def categorize(con) -> dict:
         cat, src = None, None
         f = fold(it["name"])  # ручные правила по названию строятся от fold(name)
         note = notes.get((it["purchase_id"], it["line"]))
-        if note and (k := note_category(note)) and k in K:
+        if note and (k := note_category(note, lang)) and k in K:
             cat, src = K[k], "note"  # твой комментарий важнее правил и словаря (но не ручной категории)
         elif it["product_code"] and it["product_code"] in by_code:
             cat, src = by_code[it["product_code"]], "code"

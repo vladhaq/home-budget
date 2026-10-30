@@ -206,7 +206,7 @@ document.addEventListener("click", async e => {
   if (t.dataset.bcell) {
     const cell = t.dataset.bcell === "all" ? null : t.dataset.bcell;
     if (S.bankMonth === t.dataset.bm && S.bankCell === cell) { S.bankMonth = null; S.bankCell = null; drawBankList(); return; }
-    S.bankMonth = t.dataset.bm; S.bankCell = cell; drawBankList();
+    S.bankMonth = t.dataset.bm; S.bankCell = cell; drawBankList(); openSect("bank.ops");
     document.getElementById("banklist").scrollIntoView({behavior: "smooth"}); return;
   }
   if (t.dataset.bankcellReset) { S.bankCell = null; drawBankList(); return; }
@@ -217,6 +217,10 @@ document.addEventListener("click", async e => {
   }
   if (t.dataset.updrun !== undefined) { await startUpdate(t.dataset.updrun ? [t.dataset.updrun] : []); return; }
   if (t.dataset.sched) { await setSchedule(t.dataset.sched === "on"); return; }
+  if (t.dataset.setlang) {  // язык — для всей страницы сразу: перезагрузка с ним
+    if (t.dataset.setlang !== LANG) { await post("/api/lang", {lang: t.dataset.setlang}); location.reload(); }
+    return;
+  }
   if (t.dataset.login) { await startLogin(t.dataset.login); return; }
   if (t.dataset.bcheck) { await checkBiedronkaSession(true); return; }
   if (t.dataset.upcheck !== undefined) { await checkUpgrade(); return; }
@@ -373,4 +377,6 @@ qInput.addEventListener("keydown", e => { if (e.key === "Escape") { qInput.value
 document.querySelector(".logo").innerHTML = ICON.logo;
 document.getElementById("qicon").innerHTML = ICON.search;
 applyTheme(document.documentElement.dataset.theme);
+if (!document.documentElement.dataset.lang)  // язык ещё не выбран — запоминаем браузерный (для напоминаний в Telegram)
+  post("/api/lang", {lang: LANG, auto: true}).catch(() => {});
 load();

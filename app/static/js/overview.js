@@ -6,8 +6,9 @@ const DRILL = {year: "quarter", quarter: "month", month: "day", week: "day"};  /
 const DRILL_WORD = {year: "кварталы", quarter: "месяцы", month: "дни", week: "дни"};
 const PREV_WORD = {day: "к прошлому дню", week: "к прошлой неделе", month: "к прошлому месяцу", quarter: "к прошлому кварталу", year: "к прошлому году"};
 const PER_WORD = {day: "в день", week: "в неделю", month: "в месяц", quarter: "в квартал", year: "в год"};
-const DOW = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
-const MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+const DOW = LANG === "en" ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] : ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
+const MONTHS_GEN = LANG === "en" ? MONTHS
+  : ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
 S.gran = "month"; S.period = null; S.range = null; S.crumbs = [];
 const isoDay = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 const addDays = (day, n) => { const d = new Date(day + "T12:00:00"); d.setDate(d.getDate() + n); return isoDay(d); };
@@ -26,7 +27,7 @@ function pspan(k, g) {  // первый и последний день пери�
   return [k + "-01-01", k + "-12-31"];
 }
 const plabel = (k, g) => g === "day" || g === "week" ? `${k.slice(8, 10)}.${k.slice(5, 7)}` : g === "month" ? `${k.slice(5, 7)}.${k.slice(2, 4)}`
-  : g === "quarter" ? `${k.slice(6)} кв. ${k.slice(2, 4)}` : k;
+  : g === "quarter" ? t(`${k.slice(6)} кв. ${k.slice(2, 4)}`) : k;  // ось графика — холст, переводим сами
 function pname(k, g) {
   if (g === "day") return `${+k.slice(8, 10)} ${MONTHS_GEN[+k.slice(5, 7) - 1]} ${k.slice(0, 4)}, ${DOW[new Date(k + "T12:00:00").getDay()]}`;
   if (g === "week") { const e = addDays(k, 6); return `неделя ${k.slice(8, 10)}.${k.slice(5, 7)} – ${e.slice(8, 10)}.${e.slice(5, 7)}.${e.slice(0, 4)}`; }
@@ -73,9 +74,11 @@ function donutParts(rows, pickOverride = null) {
   };
   const sums = {};
   for (const r of rows) for (const it of r.items) { const k = keyOf(it.cat); sums[k] = (sums[k] || 0) + net(it); }
-  let parts = Object.entries(sums).filter(([, v]) => v > 0.005).map(([k, v]) => (
-    {k, v, name: k === "none" ? "Неопознанные" : k === one ? `${CAT[k].name}: без подкатегории` : CAT[k].name}))
-    .sort((a, b) => b.v - a.v);
+  const part = ([k, v]) => ({k, v, name: k === "none" ? "Неопознанные" : k === one ? `${CAT[k].name}: без подкатегории` : CAT[k].name});
+  let parts = Object.entries(sums).filter(([, v]) => v > 0.005).map(part).sort((a, b) => b.v - a.v);
+  // доля с минусом (сдал тару — «Залог за тару» за месяц −6,50 zł, возврат больше покупок): нарисовать её нельзя,
+  // но и выбросить нельзя — сумма в центре разошлась бы с «потрачено»; показывается в легенде строкой «вычтено»
+  const minus = Object.entries(sums).filter(([, v]) => v < -0.005).map(part).sort((a, b) => a.v - b.v);
   const only = parts.length === 1 && parts[0].k !== "none" && parts[0].k !== one ? parts[0].k : null;
   if (only && (KIDS[only] || []).length) return donutParts(rows, [only]);
   const used = new Set();
@@ -90,7 +93,8 @@ function donutParts(rows, pickOverride = null) {
     const rest = parts.slice(7);
     parts = parts.slice(0, 7).concat({k: null, v: rest.reduce((s, p) => s + p.v, 0), name: `остальное (${rest.length})`, color: css("--c-gray2")});
   }
-  return {parts, total: parts.reduce((s, p) => s + p.v, 0)};
+  const pos = parts.reduce((s, p) => s + p.v, 0);
+  return {parts, minus, pos, total: pos + minus.reduce((s, p) => s + p.v, 0)};
 }
 
 // «по дням» без выбранного в фильтре периода: окно в N дней (длина запоминается), стрелки сдвигают его на свою длину
@@ -197,8 +201,9 @@ function renderOverview() {
   if (type === "donut") { drawDonuts(pc); renderPanel(pc); return; }
   const on = i => S.period === "all" || labels[i] === S.period;
   // расходы — синие (и скидки — зелёные пунктиром на линии), поступления — зелёные; вместе — расходы и поступления
-  const sets = flow === "out" ? [["потрачено, zł", spent, "--c-blue"], ["сэкономлено на скидках, zł", saved, "--c-green", true]]
-    : flow === "in" ? [["поступило, zł", recv, "--c-green"]] : [["потрачено, zł", spent, "--c-blue"], ["поступило, zł", recv, "--c-green"]];
+  const sets = (flow === "out" ? [["потрачено, zł", spent, "--c-blue"], ["сэкономлено на скидках, zł", saved, "--c-green", true]]
+    : flow === "in" ? [["поступило, zł", recv, "--c-green"]] : [["потрачено, zł", spent, "--c-blue"], ["поступило, zł", recv, "--c-green"]])
+    .map(([label, ...rest]) => [t(label), ...rest]);  // легенда и подсказки графика — холст
   const dataset = ([label, data, v, minor]) => {
     const c = css(v);
     if (type === "bar") return {label, data, type: "bar", solid: c, borderRadius: {topLeft: 8, topRight: 8}, borderSkipped: "bottom",
@@ -225,7 +230,7 @@ function renderOverview() {
     data: {labels: labels.map(k => plabel(k, g)), datasets: sets.map(dataset)},
     plugins: [GLOW, band],
     options: {animation: chartAnim(), interaction: {mode: "index", intersect: false}, plugins: {legend: {position: "bottom", labels: solidLegend},
-        tooltip: {callbacks: {title: items => pname(labels[items[0].dataIndex], g),
+        tooltip: {callbacks: {title: items => t(pname(labels[items[0].dataIndex], g)),
                               label: x => ` ${x.dataset.label.replace(", zł", "")}: ${zl(x.parsed.y)}`}}},
       scales: {x: softX({ticks: {autoSkip: true, maxRotation: 0}}), y: softY({beginAtZero: true})},
       onClick: (e, els, ch) => {
@@ -261,7 +266,9 @@ function drawDonuts({labels, byKey, byIn, flow}) {  // кольцо: доли з
         <div class="dcenter" id="dcenter${j}"></div></div>
       <div class="dlegend">${r.parts.map((p, i) => `<button type="button" class="dleg" data-dcat="${p.k ?? ""}" data-dj="${j}" data-di="${i}"
           ${p.k == null ? "disabled" : ""} title="${p.k == null ? "" : "показать только эту категорию"}"><i style="--c:${p.color}"></i>
-          <span>${esc(p.name)}</span><b>${zl(p.v)}</b><em>${(p.v / (r.total || 1) * 100).toFixed(0)}%</em></button>`).join("")}</div>
+          <span>${esc(p.name)}</span><b>${zl(p.v)}</b><em>${(p.v / (r.pos || 1) * 100).toFixed(0)}%</em></button>`).join("")}${
+        r.minus.map(p => `<button type="button" class="dleg minus" data-dcat="${p.k}" title="меньше нуля — в кольце не нарисовать, из суммы вычтено">
+          <i></i><span>${esc(p.name)}</span><b>−${zl(-p.v)}</b><em>вычтено</em></button>`).join("")}</div>
     </div>`).join("");
   // наведение на долю или строку легенды показывает её в центре кольца (всплывающей плашки нет — она
   // перекрывала бы сумму в центре); увёл мышь — снова общая сумма
@@ -269,7 +276,7 @@ function drawDonuts({labels, byKey, byIn, flow}) {  // кольцо: доли з
     const r = rings[j], p = i == null ? null : r.parts[i], el = document.getElementById("dcenter" + j);
     el.classList.toggle("part", !!p);
     el.innerHTML = p ? `<span class="dname"><i style="--c:${p.color}"></i>${esc(p.name)}</span><b>${zl(p.v)}</b>
-        <span>${(p.v / (r.total || 1) * 100).toFixed(0)}% · ${r.word}</span>`
+        <span>${(p.v / (r.pos || 1) * 100).toFixed(0)}% · ${r.word}</span>`
       : `<span>${r.word}</span><b>${zl(r.total)}</b><span>${esc(when)}</span>`;
   };
   rings.forEach((r, j) => {
@@ -289,7 +296,7 @@ function drawDonuts({labels, byKey, byIn, flow}) {  // кольцо: доли з
     });
     DONUTS.push(ch);
   });
-  for (const b of box.querySelectorAll(".dleg")) {  // наведение на строку легенды выдвигает долю и показывает её в центре
+  for (const b of box.querySelectorAll(".dleg:not(.minus)")) {  // наведение на строку легенды выдвигает долю и показывает её в центре
     const j = +b.dataset.dj, i = +b.dataset.di, ch = DONUTS[j];
     b.addEventListener("mouseenter", () => { ch.setActiveElements([{datasetIndex: 0, index: i}]); ch.update(); center(j, i); });
     b.addEventListener("mouseleave", () => { ch.setActiveElements([]); ch.update(); center(j); });
@@ -343,7 +350,7 @@ function renderPanel({labels, byKey, byIn, spent, saved, recv, flow}) {
     const whole = arr => arr.reduce((a, b) => a + b, 0);
     const avgOut = whole(spent) / months, avgIn = whole(recv) / months, inc = flow === "in";
     const per = g === "day" || g === "week" ? `<br>${PER_WORD[g]} ${zl(whole(inc ? recv : spent) / labels.length)}` : "";
-    const span = `за ${months.toLocaleString("ru-RU", {maximumFractionDigits: 1})} мес.`;
+    const span = `за ${months.toLocaleString(LOC, {maximumFractionDigits: 1})} мес.`;
     const d = !all && g === "month" && pspan(S.period, g)[1] < today && (inc ? avgIn : avgOut)
       ? ((inc ? got : total) / (inc ? avgIn : avgOut) - 1) * 100 : null;
     const vs = d === null ? "" : `<br><span class="${(d > 0) === inc ? "down" : "up"}">этот месяц ${d > 0 ? "+" : ""}${d.toFixed(0)}% к среднему</span>`;

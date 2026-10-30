@@ -100,3 +100,44 @@ Rabat
 SUMA PLN 5,00
 """)
     assert result["items"][0]["amount"] == 5.0 and result["items"][0]["discount"] is None
+
+
+# Фото чека вейп-шопа (вымышленный): название товара одной строкой, «1 szt*29.00 29.00A» — следующей.
+VAPE = """Vape Test Sp. z o.o.
+PARAGON FISKALNY
+LIQUID TEST 20MG 10ML - MIETOWA
+1 szt*29.00 29.00A
+Sprzedaż opodatkowana A: 29.00
+SUMA: PLN 29.00
+DO ZAPŁATY: 29.00
+Karta: 29.00
+"""
+
+
+def test_easyocr_lowercase_tax_letter_and_spaced_total():
+    easy = VAPE.replace("29.00A", "29.00a").replace("SUMA: PLN 29.00", 'SUMA " PLN 29 . 00').replace("ZAPŁATY: 29.00", "ZAPŁATY: 29 . 00")
+    r = merge([parse_text(easy)])
+    assert (r["status"], r["total"], rows(r)) == ("ok", 29.0, [("LIQUID TEST 20MG 10ML - MIETOWA", 29.0, None)])
+
+
+def test_vote_prefers_variant_that_adds_up_and_keeps_readable_name():
+    """Два одинаковых варианта Tesseract прочитали строку цены мусором («19080 ane 33.004»), ещё в двух цены нет совсем,
+    верно сложился только EasyOCR (с искажённым «LoDoHA»-названием): основа — он, название — из вариантов Tesseract."""
+    junk = VAPE.replace("1 szt*29.00 29.00A", "19080 ane 23.004")
+    no_price = VAPE.replace("1 szt*29.00 29.00A\n", "")
+    easy = VAPE.replace("MIETOWA", "HIETOHA").replace("29.00A", "29.00a")
+    runs = [parse_text(x) for x in (junk, no_price, no_price, junk)] + [parse_text(easy)] * 2
+    r = merge(runs)
+    assert (r["status"], rows(r)) == ("ok", [("LIQUID TEST 20MG 10ML - MIETOWA", 29.0, None)])
+
+
+def test_payable_total_wins_over_sum_before_deposit_return():
+    text = """PARAGON FISKALNY
+Woda 6x1,5l 1 x 9,00 9,00A
+Kaucja butelki 1 x 3,00 3,00A
+SUMA PLN 12,00
+OPAKOWANIA ZWROTNE SUMA -3,00
+DO ZAPŁATY 9,00 PLN
+"""
+    assert merge([parse_text(text)])["total"] == 9.0
+

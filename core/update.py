@@ -413,6 +413,21 @@ def describe_error(e: BaseException) -> tuple[str, str | None]:
     return f"{e.__class__.__name__}: {e}", "ошибка в программе — подробности в журнале ниже"
 
 
+SETTLE = 180  # плановый запуск ждёт 3 мин: ноутбук только проснулся или включился — Windows и так занята
+
+
+def background():
+    """Фоновый режим Windows для этого процесса: низкий приоритет процессора, диска и памяти — курсор и окна
+    не тормозят, пока идёт плановое обновление (15.10 оно стартовало через 33 с после пробуждения). Не Windows — ничего."""
+    try:
+        import ctypes
+        k = ctypes.WinDLL("kernel32")
+        k.GetCurrentProcess.restype = ctypes.c_void_p
+        k.SetPriorityClass(ctypes.c_void_p(k.GetCurrentProcess()), 0x00100000)  # PROCESS_MODE_BACKGROUND_BEGIN
+    except (AttributeError, OSError):
+        pass
+
+
 def stay_awake(on: bool, _h: list = []):  # noqa: B006 — описатель запроса живёт между вызовами
     """Попросить Windows не усыплять компьютер и не замораживать процесс, пока идёт обновление (как плеер или загрузка):
     SetThreadExecutionState — не засыпать по бездействию; запрос питания PowerRequestExecutionRequired — не
@@ -447,13 +462,24 @@ def stay_awake(on: bool, _h: list = []):  # noqa: B006 — описатель з
 
 
 def run(trigger: str = "manual", only: list[str] | None = None) -> int | None:
+    # первым делом, даже до блокировки: Windows, проснувшаяся ради автозапуска, засыпает снова через полминуты
+    # (13.10 — через 28 с), и запрос, поданный позже, уже не спасает — процесс замирает до пробуждения
+    stay_awake(True)
     lock = acquire_lock(wait=3)
     if lock is None:
+        stay_awake(False)
         print("Обновление уже идёт (другой запуск). Подожди, пока закончится.")
         return None
-    stay_awake(True)  # до ожидания сети: проснувшись ради автозапуска, Windows не уснёт снова, пока идёт обновление
     con = db()
     mark_dead(con)
+    if trigger == "schedule" and (done := caught_up(con)):
+        print(f"Плановое обновление уже прошло ({done}) — повторять не нужно.")
+        lock.close()
+        stay_awake(False)
+        return None
+    if trigger == "schedule":  # пропущенный запуск стартует сразу после пробуждения или входа — дать Windows прийти в себя
+        background()
+        time.sleep(SETTLE)
     from core import stores
     on = stores.enabled(con)  # выключенный в «Настройках» магазин не обновляется
     skip = skipped(con) if not only else set()  # выключенный из «Обновить всё» шаг — только вручную
@@ -521,19 +547,57 @@ def run(trigger: str = "manual", only: list[str] | None = None) -> int | None:
 
 # ---------------------------------------------------------------- состояние (для интерфейса и `update status`)
 
-def mark_dead(con):
-    """Запуск без отметки об окончании, когда обновление не идёт, — процесс завершился аварийно
-    (выключили компьютер, закрыли окно). Вызывать, только убедившись, что is_running() == False."""
-    if not con.execute("SELECT 1 FROM update_runs WHERE finished IS NULL").fetchone():
+def boot_time() -> dt.datetime | None:
+    """Когда Windows загрузилась (включение или перезагрузка, не выход из сна): сейчас минус время работы системы —
+    GetTickCount64 идёт и во сне. Не Windows — None."""
+    try:
+        import ctypes
+        k = ctypes.WinDLL("kernel32")
+        k.GetTickCount64.restype = ctypes.c_ulonglong
+        return dt.datetime.now() - dt.timedelta(milliseconds=k.GetTickCount64())
+    except (AttributeError, OSError):
+        return None
+
+
+def mark_dead(con, booted: dt.datetime | None = None):
+    """Запуск без отметки об окончании, когда обновление не идёт, — процесс завершился аварийно. Причина — по времени
+    загрузки Windows: загрузилась позже начала — компьютер выключился или перезагрузился (13.10 Windows упала во сне,
+    ноутбук включили только днём); ни одного шага — процесс замер во сне сразу после автозапуска.
+    Вызывать, только убедившись, что is_running() == False."""
+    dead = con.execute("SELECT r.id, r.started, (SELECT COUNT(*) FROM update_steps s WHERE s.run_id = r.id) "
+                       "FROM update_runs r WHERE r.finished IS NULL").fetchall()
+    if not dead:
         return
-    msg = "прервано: процесс обновления завершился, не дойдя до конца"
-    # ни одного шага: обычно ноутбук уснул сразу после автозапуска, и Windows сняла задачу по лимиту времени
-    con.execute("UPDATE update_runs SET finished = ?, status = 'error', summary = ? WHERE finished IS NULL "
-                "AND NOT EXISTS (SELECT 1 FROM update_steps s WHERE s.run_id = update_runs.id)",
-                (now(), "прервано до первого шага: компьютер, скорее всего, уснул сразу после автозапуска"))
-    con.execute("UPDATE update_runs SET finished = ?, status = 'error', summary = ? WHERE finished IS NULL", (now(), msg))
-    con.execute("UPDATE update_steps SET finished = ?, status = 'error', summary = ? WHERE status = 'running'", (now(), msg))
+    booted = booted or boot_time()
+    for rid, started, steps in dead:
+        if booted and started < booted.isoformat(timespec="seconds"):
+            msg = f"прервано: Windows выключилась или перезагрузилась во время обновления (снова включена {booted:%d.%m %H:%M})"
+        elif not steps:
+            msg = "прервано до первого шага: компьютер уснул сразу после автозапуска, и обновление замерло"
+        else:
+            msg = "прервано: процесс обновления завершился, не дойдя до конца"
+        con.execute("UPDATE update_runs SET finished = ?, status = 'error', summary = ? WHERE id = ?", (now(), msg, rid))
+        con.execute("UPDATE update_steps SET finished = ?, status = 'error', summary = ? WHERE run_id = ? AND status = 'running'",
+                    (now(), msg, rid))
     con.commit()
+
+
+def caught_up(con, at: dt.datetime | None = None) -> str | None:
+    """Плановый запуск после последнего времени автозапуска уже дошёл до конца? Тогда второй триггер задачи —
+    вход в Windows — ничего не делает; а если тот запуск прервался (сбой, выключение) или его не было — обновление
+    повторится. Время автозапуска — из «schedule_at» (пишет schedule_on); нет его — проверки нет."""
+    row = con.execute("SELECT value FROM meta WHERE key = 'schedule_at'").fetchone()
+    if not row:
+        return None
+    at = at or dt.datetime.now()
+    h, m = map(int, row[0].split(":"))
+    slot = at.replace(hour=h, minute=m, second=0, microsecond=0)
+    if slot > at + dt.timedelta(minutes=2):  # до времени автозапуска сегодня — считается вчерашний
+        slot -= dt.timedelta(days=1)
+    done = con.execute("SELECT started FROM update_runs WHERE trigger = 'schedule' AND started >= ? AND finished IS NOT NULL "
+                       "AND summary NOT LIKE 'прервано%' ORDER BY id DESC LIMIT 1",
+                       (slot.isoformat(timespec="seconds"),)).fetchone()
+    return done[0].replace("T", " ")[:16] if done else None
 
 
 def runs(con, limit: int = 30) -> list[dict]:
@@ -678,13 +742,21 @@ def schedule_on(at: str = "07:30"):
         raise SystemExit("Время в формате ЧЧ:ММ, например 07:30")
     q = lambda s: str(s).replace("'", "''")  # noqa: E731
     # не уснуть посреди обновления просит само обновление (stay_awake); лимит 12 ч — запасной: если ноутбук всё же
-    # «заморозил» запуск (закрыли крышку), тот продолжится после пробуждения, а не будет снят Windows (с 2 ч снимала)
+    # «заморозил» запуск (закрыли крышку), тот продолжится после пробуждения, а не будет снят Windows (с 2 ч снимала).
+    # Второй триггер — вход в Windows: если плановое обновление прервалось (Windows упала во сне, выключили) —
+    # повторится; если прошло — запуск сразу выходит (caught_up). Не дали права на триггер входа — только ежедневный.
     _ps(f"""
 $a = New-ScheduledTaskAction -Execute '{q(pythonw())}' -Argument '"{q(BUDGET / "budget.py")}" update --trigger schedule' -WorkingDirectory '{q(BUDGET)}'
 $t = New-ScheduledTaskTrigger -Daily -At ([datetime]::Today.AddHours({int(at.split(":")[0])}).AddMinutes({int(at.split(":")[1])}))
+$l = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\\$env:USERNAME"
 $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 12)
-Register-ScheduledTask -TaskName '{TASK}' -Action $a -Trigger $t -Settings $s -Description 'Домашний бюджет: обновить всё (budget.py update). Если компьютер был выключен — запустится при включении.' -Force | Out-Null
+$d = 'Домашний бюджет: обновить всё (budget.py update). Компьютер был выключен — запустится при включении; обновление прервалось — повторится при входе в Windows.'
+try {{ Register-ScheduledTask -TaskName '{TASK}' -Action $a -Trigger @($t, $l) -Settings $s -Description $d -Force -ErrorAction Stop | Out-Null }}
+catch {{ Register-ScheduledTask -TaskName '{TASK}' -Action $a -Trigger $t -Settings $s -Description $d -Force | Out-Null }}
 """)
+    con = db()
+    set_meta(con, "schedule_at", f"{int(at.split(':')[0]):02d}:{at.split(':')[1]}")
+    con.commit()
     return schedule_status()
 
 
@@ -701,6 +773,8 @@ if (-not $t) {{ '{{"installed": false}}'; exit }}
 $i = $t | Get-ScheduledTaskInfo
 $f = {{ param($d) if ($d -and $d.Year -gt 2000) {{ $d.ToString('s') }} else {{ $null }} }}
 [pscustomobject]@{{ installed = $true; state = "$($t.State)"; start = "$($t.Triggers[0].StartBoundary)";
+  logon = [bool]($t.Triggers | Where-Object {{ $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' }});
+  limit = "$($t.Settings.ExecutionTimeLimit)";
   last_run = (& $f $i.LastRunTime); last_result = $i.LastTaskResult; next_run = (& $f $i.NextRunTime) }} | ConvertTo-Json -Compress
 """)
         s = json.loads(out.splitlines()[-1])
@@ -711,6 +785,8 @@ $f = {{ param($d) if ($d -and $d.Year -gt 2000) {{ $d.ToString('s') }} else {{ $
         s["time"] = m.group(1) if m else None
         # 0 — успешно, 267011 — ещё не запускалось, 267009 — выполняется сейчас
         s["last_ok"] = s.get("last_result") in (0, 267011, 267009)
+        # задача от старой версии: без повтора при входе и с лимитом 2 ч — пересохранить
+        s["stale"] = not s.get("logon") or s.get("limit") != "PT12H"
     return s
 
 

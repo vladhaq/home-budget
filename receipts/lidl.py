@@ -231,8 +231,10 @@ def check_total(purchase: dict, items: list[dict]) -> str:
 
 SPAN_RE = re.compile(r'<span id="purchase_list_line_\d+" class="(article|discount)"([^>]*)>(.*?)</span>', re.S)
 ATTR_RE = re.compile(r'data-([a-z-]+)="([^"]*)"')
-# «2 * 10.99 21.98 C» и весовые «1,094kg x 24.8 27.13 C»
-QTY_LINE_RE = re.compile(r"(-?\d+(?:[.,]\d+)?)\s*(?:kg|szt\.?)?\s*[x×*]\s*(-?\d+(?:[.,]\d{1,2})?)\s+(-?\d+[.,]\d{2})")
+# «2 * 10.99 21.98 C» и весовые «1,094kg x 24.8 27.13 C»; ноль в конце Lidl не печатает: «1,246kg x 24.8 30.9 C»
+# (30,90) — сумма с одним знаком тоже сумма, иначе строка становилась второй позицией без суммы
+QTY_LINE_RE = re.compile(r"(-?\d+(?:[.,]\d+)?)\s*(?:kg|szt\.?)?\s*[x×*]\s*(-?\d+(?:[.,]\d{1,2})?)\s+(-?\d+(?:[.,]\d{1,2})?)"
+                         r"(?=\s+[A-Z]\b|\s*$)")
 
 
 def parse_html_receipt(html_text: str) -> list[dict]:

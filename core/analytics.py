@@ -239,7 +239,7 @@ def month_forecast(con, rec: list[dict]) -> dict:
     start = add_months(m0, -BASE_MONTHS)
     spend = defaultdict(lambda: defaultdict(lambda: [0.0, 0.0, 0.0]))  # месяц -> группа -> [всё до дня d, после d — переменное, всё]
     first_purchase = con.execute("SELECT min(date) FROM purchases").fetchone()[0]
-    for it in con.execute("""SELECT p.id, p.date, i.category_id cat, i.amount - coalesce(i.discount, 0) v
+    for it in con.execute("""SELECT p.id, p.date, i.category_id cat, coalesce(i.amount, 0) - coalesce(i.discount, 0) v
                              FROM items i JOIN purchases p ON p.id = i.purchase_id
                              WHERE coalesce(p.status, '') != 'doubt' AND p.date >= ? AND p.date <= ?""",
                           (start.isoformat(), mend.isoformat() + "T23:59:59")):

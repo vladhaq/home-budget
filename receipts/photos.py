@@ -165,6 +165,51 @@ def recognize(path: Path, hint_date: str | None = None, verbose=False) -> tuple[
     return result, "\n\n### ---\n".join(texts)
 
 
+RANK = {"check": 0, "derived": 1, "ok": 2}
+
+
+def archived_vote(digest: str, hint_date: str | None = None) -> dict | None:
+    """Чек заново из сохранённого текста OCR (все варианты Tesseract и EasyOCR — в data/photos/<digest>.txt),
+    без нового распознавания. Нет архива — None."""
+    txt = PHOTOS / f"{digest}.txt"
+    if not txt.exists():
+        return None
+    parts = txt.read_text(encoding="utf-8").split("\n\n### ---\n")
+    tess = [t for t in parts if not t.startswith("### EasyOCR")]
+    easy = next((t.split("\n", 1)[1] for t in parts if t.startswith("### EasyOCR")), None)
+    return vote(tess, easy, hint_date)[0]
+
+
+def reparse(verbose=True) -> int:
+    """Фото чеков — заново из сохранённого текста, когда разбор стал лучше (как пересборка чеков Lidl и Kaufland).
+    Переписывается только чек, у которого статус улучшился: было «вычислено из итога» или «проверить», стало «сумма
+    сходится». Ручные категории сохраняются (save_purchase), магазин, не прочитанный с фото, сверка возьмёт из банка."""
+    con = connect()
+    done = 0
+    for p in con.execute("SELECT id, date, merchant, store, payment_method, raw_path, note FROM purchases "
+                         "WHERE source = 'photo'").fetchall():
+        digest = p["id"].split(":", 1)[1]
+        js = PHOTOS / f"{digest}.json"
+        if not js.exists():
+            continue
+        old = json.loads(js.read_text(encoding="utf-8"))
+        r = archived_vote(digest, (p["date"] or "")[:10] or None)
+        if not r or RANK.get(r["status"], 0) <= RANK.get(old.get("status"), 0):
+            continue
+        save_purchase(con, {"id": p["id"], "source": "photo", "date": r["date"] or p["date"],
+                            "merchant": r["merchant"] or p["merchant"], "store": r["store"] or p["store"], "total": r["total"],
+                            "payment_method": r["payment"] or p["payment_method"], "raw_path": p["raw_path"]}, r["items"], [])
+        rest = [s for s in (p["note"] or "").split("; ") if s and s not in STATUS.values()]
+        note = "; ".join(rest + ([] if r["status"] == "ok" else [STATUS[r["status"]]])) or None
+        con.execute("UPDATE purchases SET note = ? WHERE id = ?", (note, p["id"]))
+        js.write_text(json.dumps(r, ensure_ascii=False, indent=1), encoding="utf-8")
+        done += 1
+        if verbose:
+            print(f"  фото {digest}: {STATUS[old.get('status', 'check')]} → {STATUS[r['status']]}, позиций {len(r['items'])}")
+    con.commit()
+    return done
+
+
 # ---------------------------------------------------------------- импорт в базу
 
 def import_file(con, path: Path, hint_date: str | None = None, source_ref: str | None = None) -> dict | None:
